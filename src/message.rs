@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{EnvoyError, Result};
@@ -145,6 +147,128 @@ impl MessageEnvelope {
     }
 }
 
+use sqlitegraph::{GraphEntity, SqliteGraph};
+
+const KIND_MESSAGE: &str = "EnvoyMessage";
+
+/// Persists messages in sqlitegraph and assigns sequence IDs.
+pub struct MessageStore {
+    graph: Arc<std::sync::Mutex<SqliteGraph>>,
+}
+
+impl MessageStore {
+    pub fn new(graph: Arc<std::sync::Mutex<SqliteGraph>>) -> Self {
+        Self { graph }
+    }
+
+    /// Store a message and assign its message_id, timestamp, and sequence_id.
+    /// Returns the fully-populated envelope.
+    pub fn store(&self, mut msg: MessageEnvelope) -> Result<MessageEnvelope> {
+        msg.validate()?;
+
+        let graph = self.graph.lock().unwrap();
+
+        // Assign message_id if not set
+        if msg.message_id.is_empty() {
+            msg.message_id = uuid::Uuid::new_v4().to_string();
+        }
+
+        msg.timestamp = chrono::Utc::now().to_rfc3339();
+
+        // Compute next sequence_id for this recipient
+        msg.sequence_id = self.next_sequence(&graph, &msg.to)? + 1;
+
+        let entity = GraphEntity {
+            id: 0,
+            kind: KIND_MESSAGE.to_string(),
+            name: format!("msg-{}-{}", msg.to, msg.sequence_id),
+            file_path: None,
+            data: serde_json::to_value(&msg)?,
+        };
+        let id = graph.insert_entity(&entity)?;
+        msg.message_id = id.to_string();
+
+        Ok(msg)
+    }
+
+    /// Get messages for a recipient since a given sequence_id.
+    pub fn poll(&self, to: &str, since: i64, limit: i64) -> Result<Vec<MessageEnvelope>> {
+        let graph = self.graph.lock().unwrap();
+        let ids = graph.list_entity_ids()?;
+        let mut messages = Vec::new();
+
+        for id in ids {
+            if let Ok(entity) = graph.get_entity(id) {
+                if entity.kind == KIND_MESSAGE {
+                    if let Ok(mut msg) =
+                        serde_json::from_value::<MessageEnvelope>(entity.data.clone())
+                    {
+                        msg.message_id = id.to_string();
+                        if msg.to == to && msg.sequence_id > since {
+                            messages.push(msg);
+                        }
+                    }
+                }
+            }
+        }
+
+        messages.sort_by_key(|m| m.sequence_id);
+        if messages.len() > limit as usize {
+            messages.truncate(limit as usize);
+        }
+        Ok(messages)
+    }
+
+    /// Get a single message by ID.
+    pub fn get(&self, message_id: &str) -> Result<MessageEnvelope> {
+        let id: i64 = message_id
+            .parse()
+            .map_err(|_| EnvoyError::MessageNotFound(message_id.to_string()))?;
+        let graph = self.graph.lock().unwrap();
+        let entity = graph
+            .get_entity(id)
+            .map_err(|_| EnvoyError::MessageNotFound(message_id.to_string()))?;
+        if entity.kind != KIND_MESSAGE {
+            return Err(EnvoyError::MessageNotFound(message_id.to_string()));
+        }
+        let mut msg = serde_json::from_value::<MessageEnvelope>(entity.data)?;
+        msg.message_id = id.to_string();
+        Ok(msg)
+    }
+
+    /// Get total message count.
+    pub fn count_all(&self) -> Result<i64> {
+        let graph = self.graph.lock().unwrap();
+        let ids = graph.list_entity_ids()?;
+        let mut count = 0i64;
+        for id in ids {
+            if let Ok(entity) = graph.get_entity(id) {
+                if entity.kind == KIND_MESSAGE {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    fn next_sequence(&self, graph: &SqliteGraph, to: &str) -> Result<i64> {
+        let ids = graph.list_entity_ids()?;
+        let mut max_seq = 0i64;
+        for id in ids {
+            if let Ok(entity) = graph.get_entity(id) {
+                if entity.kind == KIND_MESSAGE {
+                    if let Ok(msg) = serde_json::from_value::<MessageEnvelope>(entity.data) {
+                        if msg.to == to && msg.sequence_id > max_seq {
+                            max_seq = msg.sequence_id;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(max_seq)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +410,59 @@ mod tests {
             parts,
         };
         assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn message_store_assigns_ids() {
+        use std::sync::Arc;
+        let graph = Arc::new(std::sync::Mutex::new(
+            sqlitegraph::SqliteGraph::open_in_memory().unwrap(),
+        ));
+        let store = MessageStore::new(graph);
+
+        let msg = MessageEnvelope {
+            message_id: String::new(),
+            msg_type: MessageType::Direct,
+            from: "id1".into(),
+            to: "id2".into(),
+            task_id: None,
+            context_id: None,
+            timestamp: String::new(),
+            sequence_id: 0,
+            parts: vec![Part {
+                content: PartContent::Text("hello".into()),
+            }],
+        };
+
+        let stored = store.store(msg).unwrap();
+        assert!(!stored.message_id.is_empty());
+        assert!(!stored.timestamp.is_empty());
+        assert_eq!(stored.sequence_id, 1);
+
+        let stored2 = store
+            .store(MessageEnvelope {
+                message_id: String::new(),
+                msg_type: MessageType::Direct,
+                from: "id1".into(),
+                to: "id2".into(),
+                task_id: None,
+                context_id: None,
+                timestamp: String::new(),
+                sequence_id: 0,
+                parts: vec![Part {
+                    content: PartContent::Text("world".into()),
+                }],
+            })
+            .unwrap();
+        assert_eq!(stored2.sequence_id, 2);
+
+        // Poll for messages to id2 since sequence 0
+        let msgs = store.poll("id2", 0, 50).unwrap();
+        assert_eq!(msgs.len(), 2);
+
+        // Poll since sequence 1 — only message 2
+        let msgs = store.poll("id2", 1, 50).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].sequence_id, 2);
     }
 }
