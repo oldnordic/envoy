@@ -25,3 +25,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.26"
+
+[[bin]]
+name = "envoy"
+path = "src/main.rs"

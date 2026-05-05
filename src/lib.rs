@@ -34,6 +34,7 @@ pub mod engine;
 pub mod error;
 pub mod http;
 pub mod message;
+pub mod server;
 pub mod types;
 
 pub use engine::Engine;
