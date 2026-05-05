@@ -32,6 +32,7 @@
 pub mod agent;
 pub mod engine;
 pub mod error;
+pub mod http;
 pub mod message;
 pub mod types;
 

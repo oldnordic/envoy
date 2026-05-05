@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{EnvoyError, Result};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub agent_id: String,
     pub name: String,
