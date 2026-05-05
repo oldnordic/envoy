@@ -29,11 +29,17 @@ pub struct AgentRegistry {
     tree: Arc<Mutex<AgentTree>>,
 }
 
-impl AgentRegistry {
-    pub fn new() -> Self {
+impl Default for AgentRegistry {
+    fn default() -> Self {
         Self {
             tree: Arc::new(Mutex::new(AgentTree::default())),
         }
+    }
+}
+
+impl AgentRegistry {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Register an agent and return its server-assigned ID.
@@ -64,10 +70,7 @@ impl AgentRegistry {
 
         tree.agents.insert(agent_id.clone(), info.clone());
         if let Some(ref pid) = parent_id {
-            tree.children
-                .entry(pid.clone())
-                .or_default()
-                .push(agent_id);
+            tree.children.entry(pid.clone()).or_default().push(agent_id);
         }
 
         Ok(info)
@@ -132,10 +135,7 @@ impl AgentRegistry {
 
     pub fn is_online(&self, agent_id: &str) -> bool {
         let tree = self.tree.lock().unwrap();
-        tree.agents
-            .get(agent_id)
-            .map(|a| a.online)
-            .unwrap_or(false)
+        tree.agents.get(agent_id).map(|a| a.online).unwrap_or(false)
     }
 }
 

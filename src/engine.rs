@@ -339,10 +339,7 @@ impl Engine {
     // ── Status ──
 
     pub fn status(&self) -> Result<EngineStats> {
-        let ids = self
-            .graph
-            .list_entity_ids()
-            .map_err(|e| EnvoyError::Graph(e))?;
+        let ids = self.graph.list_entity_ids().map_err(EnvoyError::Graph)?;
         let mut channels = 0i64;
         let mut events = 0i64;
         let mut subscriptions = 0i64;
@@ -466,8 +463,7 @@ fn event_from_entity(entity: &GraphEntity) -> Result<Event> {
     let payload = entity
         .data
         .get("payload")
-        .map(|v| serde_json::from_value(v.clone()).ok())
-        .flatten()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_else(|| EventPayload {
             status: AgentStatus::Working,
             working_on: "unknown".into(),
