@@ -250,3 +250,234 @@ fn error_display_messages() {
     let err = EnvoyError::InvalidMessage("missing parts".into());
     assert!(err.to_string().contains("missing parts"));
 }
+
+// ── HTTP integration tests ──
+
+use axum::body::Body;
+use axum::http::StatusCode;
+use axum::Router;
+use std::sync::{Arc, Mutex};
+use tower::ServiceExt; // for oneshot
+
+fn test_app() -> Router {
+    let conn = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+    let state = Arc::new(envoy::http::AppState::new(conn));
+    envoy::http::build_router(state)
+}
+
+#[tokio::test]
+async fn register_agent_via_http() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"claude","kind":"claude"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["agent_id"], "id1");
+    assert_eq!(json["name"], "claude");
+}
+
+#[tokio::test]
+async fn list_agents() {
+    let app = test_app();
+
+    // Register two agents
+    for (name, kind) in [("claude", "claude"), ("hermes", "hermes")] {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"name":"{}","kind":"{}"}}"#,
+                        name, kind
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["agents"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn send_and_poll_messages() {
+    let app = test_app();
+
+    // Register two agents
+    let register = |name: &str, kind: &str| {
+        let body = format!(r#"{{"name":"{}","kind":"{}"}}"#, name, kind);
+        async {
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agents")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    register("claude", "claude").await;
+    register("hermes", "hermes").await;
+
+    // Send a direct message from id1 to id2
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"type":"direct","from":"id1","to":"id2","parts":[{"text":"hello hermes"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let msg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(msg["sequence_id"], 1);
+
+    // Poll messages for id2
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/messages?to=id2&since=0&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["messages"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn send_message_offline_agent_fails() {
+    let app = test_app();
+
+    // Register and immediately disconnect
+    let register_body = r#"{"name":"ghost","kind":"claude"}"#;
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(register_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri("/agents/id1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Register a second agent as recipient
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"hermes","kind":"hermes"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Try sending from the offline agent
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"type":"direct","from":"id1","to":"id2","parts":[{"text":"hello?"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn health_endpoint() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+}
