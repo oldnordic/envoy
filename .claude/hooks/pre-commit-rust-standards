@@ -1,0 +1,217 @@
+#!/bin/bash
+# Pre-commit validation hook — Microsoft Rust Guidelines + Project Standards
+# Enforces: terminology, license, claims, Rust quality (M- prefix = Microsoft guideline)
+# Blocks commits that violate standards in PUBLIC docs and NEW Rust code.
+# Uses git diff --cached to only flag NEW violations (not pre-existing ones).
+#
+# Source: ~/.hermes/hooks/pre-commit-rust-standards (single source of truth)
+# Deployed to: sqlitegraph, mirage, magellan, splice, llmgrep, rocmforge
+#
+# ─── PROJECT CONFIG (edit this block per project) ──────────────────────
+
+PROJECT=$(basename "$(pwd)")
+
+# AI terminology exclusions — words that are legitimate in this project's domain
+# Default: empty (all AI/LLM terms blocked in public docs)
+# llmgrep example: TERMINOLOGY_EXCLUDE="llmgrep|LLMGrep|aio|aio_"
+TERMINOLOGY_EXCLUDE=""
+
+# Crate type: "lib" (strict) or "bin" (relaxed for panic!/expect)
+# Lib crates: panic!() is a warning. Bin crates: panic!() is allowed for fatal errors.
+CRATE_TYPE="lib"
+
+# Extra cargo check flags (e.g., "--features gpu" for rocmforge)
+CARGO_CHECK_FLAGS=""
+
+# Skip specific checks (space-separated): "dead_code debug_derive panic_check"
+# Used when a project legitimately needs a specific exemption.
+SKIP_CHECKS=""
+
+# Extra check blocks (shell functions named extra_check_*)
+# Define below the standard checks section if this project needs domain-specific gates.
+
+# ─── END PROJECT CONFIG ───────────────────────────────────────────────
+
+set -e
+
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM '*.rs' 2>/dev/null || true)
+STAGED_DOCS=$(git diff --cached --name-only --diff-filter=ACM '*.md' '*.toml' 2>/dev/null || true)
+FAIL=0
+
+# Helper: check if a check is skipped
+skip_check() {
+    echo "$SKIP_CHECKS" | grep -qw "$1"
+}
+
+echo "🔍 [$PROJECT] Pre-commit validation..."
+
+# ─── PUBLIC DOCS ────────────────────────────────────────────────────────
+
+# M-TERMINOLOGY: No AI/LLM terminology in public docs
+echo "  ✓ Checking public docs for AI/LLM terminology..."
+if echo "$STAGED_DOCS" | grep -qE 'README\.md|MANUAL\.md|CHANGELOG\.md|Cargo\.toml'; then
+    EXCLUDE_FILTER=""
+    if [ -n "$TERMINOLOGY_EXCLUDE" ]; then
+        EXCLUDE_FILTER=" | grep -v -E '$TERMINOLOGY_EXCLUDE'"
+    fi
+    BAD=$(eval "git diff --cached -- README.md MANUAL.md CHANGELOG.md Cargo.toml 2>/dev/null \
+        | grep '^+' | grep -vi \"^+++\" \
+        | grep -iE 'LLM|AI assistant|production-ready' \
+        $EXCLUDE_FILTER" || true)
+    if [ -n "$BAD" ]; then
+        echo "❌ FAIL: AI/LLM terminology in added lines:"
+        echo "$BAD"
+        echo "   Internal docs (.planning/, .internal/, BUILD_*.md) are fine"
+        FAIL=1
+    fi
+fi
+
+# LICENSE: GPL-3.0 only (not or-later)
+echo "  ✓ Checking license..."
+if git diff --cached --name-only | grep -q 'Cargo\.toml'; then
+    if git diff --cached -- Cargo.toml | grep '^+' | grep -q 'GPL-3.0-or-later'; then
+        echo "❌ FAIL: License must be GPL-3.0 only, not GPL-3.0-or-later"
+        FAIL=1
+    fi
+fi
+
+# CLAIMS: No "production-ready" in public docs
+if [ "$FAIL" -eq 0 ]; then
+    if echo "$STAGED_DOCS" | grep -qE 'README\.md|MANUAL\.md|CHANGELOG\.md'; then
+        BAD=$(git diff --cached -- README.md MANUAL.md CHANGELOG.md 2>/dev/null \
+            | grep '^+' | grep -vi "^+++" \
+            | grep -i 'production-ready' || true)
+        if [ -n "$BAD" ]; then
+            echo "❌ FAIL: No software is production-ready, use 'stable' instead"
+            FAIL=1
+        fi
+    fi
+fi
+
+# ─── RUST CODE — Microsoft Guidelines ────────────────────────────────────
+
+if [ -n "$STAGED_RS" ]; then
+
+    # M-LINT-OVERRIDE-EXPECT: #[allow( without reason = "..."
+    if ! skip_check "lint_override"; then
+        echo "  ✓ Checking lint overrides (M-LINT-OVERRIDE-EXPECT)..."
+        BAD=$(git diff --cached -- '*.rs' 2>/dev/null \
+            | grep '^+' | grep -vi "^+++" \
+            | grep '#\[allow(' | grep -v 'reason\s*=' | grep -v 'dead_code' | head -10 || true)
+        if [ -n "$BAD" ]; then
+            echo "❌ FAIL: #[allow(...)] without reason = \"...\" (use #[expect] with reason)"
+            echo "   Guideline: M-LINT-OVERRIDE-EXPECT"
+            echo "$BAD"
+            FAIL=1
+        fi
+    fi
+
+    # NO-UNWRAP: .unwrap() in non-test code
+    echo "  ✓ Checking .unwrap() in non-test code..."
+    BAD=$(git diff --cached -- '*.rs' 2>/dev/null \
+        | grep '^+' | grep -vi "^+++" \
+        | grep '\.unwrap()' \
+        | grep -v '#\[cfg(test)\]\|#\[test\]\|mod tests\|// test\|fn test_' | head -10 || true)
+    if [ -n "$BAD" ]; then
+        echo "❌ FAIL: .unwrap() in non-test code — use Result<T> with ? operator"
+        echo "$BAD"
+        FAIL=1
+    fi
+
+    # NO-EXPECT: .expect("...") in non-test code (warning)
+    echo "  ✓ Checking .expect() in non-test code..."
+    BAD=$(git diff --cached -- '*.rs' 2>/dev/null \
+        | grep '^+' | grep -vi "^+++" \
+        | grep '\.expect(' \
+        | grep -v '#\[cfg(test)\]\|#\[test\]\|mod tests\|// test\|fn test_' \
+        | grep -v 'infallible\|unreachable\|already checked' | head -10 || true)
+    if [ -n "$BAD" ]; then
+        echo "⚠️  WARN: .expect() in non-test code — consider returning Result<T> with ? operator"
+        echo "   (not blocking, but review these lines)"
+        echo "$BAD"
+    fi
+
+    # NO-TODO-MACROS: todo!() and unimplemented!() in non-test code
+    echo "  ✓ Checking todo!/unimplemented! macros..."
+    BAD=$(git diff --cached -- '*.rs' 2>/dev/null \
+        | grep '^+' | grep -vi "^+++" \
+        | grep -E 'todo!\(\)|unimplemented!\(\)' \
+        | grep -v '#\[cfg(test)\]\|#\[test\]\|mod tests\|// test\|fn test_' | head -10 || true)
+    if [ -n "$BAD" ]; then
+        echo "❌ FAIL: todo!()/unimplemented!() in non-test code — implement or remove"
+        echo "$BAD"
+        FAIL=1
+    fi
+
+    # M-PANIC-IS-STOP: panic!() in library code
+    # Behavior depends on CRATE_TYPE: lib=warning, bin=skip entirely
+    if ! skip_check "panic_check"; then
+        echo "  ✓ Checking panic!() ($CRATE_TYPE crate)..."
+        BAD=$(git diff --cached -- '*.rs' 2>/dev/null \
+            | grep '^+' | grep -vi "^+++" \
+            | grep 'panic!' \
+            | grep -v '#\[cfg(test)\]\|#\[test\]\|mod tests\|fn test_' \
+            | grep -v 'unreachable!\|todo!\|unimplemented!' | head -10 || true)
+        if [ -n "$BAD" ]; then
+            if [ "$CRATE_TYPE" = "lib" ]; then
+                echo "⚠️  WARN: panic!() in library code — libraries should return Result<T>"
+                echo "   Guideline: M-PANIC-IS-STOP (panics are for apps, not libraries)"
+                echo "   (not blocking — some cases are valid: unreachable!, assertion failures)"
+                echo "$BAD"
+            fi
+            # For bin crates, panic! is expected for fatal errors — no warning needed
+        fi
+    fi
+
+    # NO-DEAD-CODE: #[allow(dead_code)] hiding unused code
+    if ! skip_check "dead_code"; then
+        echo "  ✓ Checking #[allow(dead_code)]..."
+        BAD=$(git diff --cached -- '*.rs' 2>/dev/null \
+            | grep '^+' | grep -vi "^+++" \
+            | grep 'allow(dead_code)' | head -10 || true)
+        if [ -n "$BAD" ]; then
+            echo "❌ FAIL: #[allow(dead_code)] — remove unused code, don't hide it"
+            echo "$BAD"
+            FAIL=1
+        fi
+    fi
+
+    # M-PUBLIC-DEBUG: Public struct/enum without Debug derive
+    if ! skip_check "debug_derive"; then
+        echo "  ✓ Checking pub types for Debug derive (M-PUBLIC-DEBUG)..."
+        NEW_PUB_TYPES=$(git diff --cached -- '*.rs' 2>/dev/null \
+            | grep '^+' | grep -vi "^+++" \
+            | grep -E 'pub struct|pub enum' \
+            | grep -v '<' | head -20 || true)
+        if [ -n "$NEW_PUB_TYPES" ]; then
+            echo "   New public types found (verify they implement Debug):"
+            echo "$NEW_PUB_TYPES" | head -5
+        fi
+    fi
+
+fi
+
+# ─── EXTRA CHECKS (project-specific) ────────────────────────────────────
+
+# Call any extra_check_* functions defined by the project config
+for fn in $(declare -F | grep 'extra_check_' | awk '{print $3}'); do
+    $fn
+done
+
+# ─── CARGO CHECK ────────────────────────────────────────────────────────
+
+echo "  ✓ Running cargo check $CARGO_CHECK_FLAGS..."
+if ! cargo check --quiet $CARGO_CHECK_FLAGS 2>&1 | head -5; then
+    echo "❌ FAIL: cargo check failed"
+    FAIL=1
+fi
+
+# ─── RESULT ─────────────────────────────────────────────────────────────
+
+if [ "$FAIL" -eq 1 ]; then
+    echo "❌ [$PROJECT] Validation FAILED — fix the issues above before committing"
+    exit 1
+fi
+
+echo "✅ [$PROJECT] All validation checks passed"
+exit 0

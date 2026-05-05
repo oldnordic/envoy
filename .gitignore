@@ -1,0 +1,4 @@
+/target
+.magellan/
+.claude/settings.local.json
+.remember/
