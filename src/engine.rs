@@ -20,6 +20,11 @@ const EDGE_SUBSCRIBES_TO: &str = "SUBSCRIBES_TO";
 ///
 /// Uses in-memory caches to avoid O(n) entity ID scans on hot paths
 /// (sqlitegraph 2.1.4 does not expose raw SQL publicly).
+///
+/// **Thread safety:** `!Sync` (inherited from SqliteGraph's internal `RefCell`).
+/// Used only in synchronous integration tests. If used in an async context,
+/// wrap in `Arc<tokio::sync::Mutex<Engine>>` — the `RefCell` caches will be
+/// replaced by sqlitegraph query methods once 2.2.0 ships.
 pub struct Engine {
     graph: SqliteGraph,
     publisher: Publisher,
