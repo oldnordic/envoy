@@ -1,18 +1,64 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::{routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
 use crate::error::{EnvoyError, Result};
 use crate::message::{MessageEnvelope, MessageStore, MessageType, Part};
 
+/// Registry of active WebSocket senders, keyed by agent_id.
+struct WsRegistry {
+    senders: Mutex<HashMap<String, broadcast::Sender<String>>>,
+}
+
+impl WsRegistry {
+    fn new() -> Self {
+        Self {
+            senders: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn register(&self, agent_id: &str) -> broadcast::Receiver<String> {
+        let mut senders = self.senders.lock().unwrap();
+        if let Some(tx) = senders.get(agent_id) {
+            tx.subscribe()
+        } else {
+            let (tx, rx) = broadcast::channel(256);
+            senders.insert(agent_id.to_string(), tx);
+            rx
+        }
+    }
+
+    fn unregister(&self, agent_id: &str) {
+        let mut senders = self.senders.lock().unwrap();
+        senders.remove(agent_id);
+    }
+
+    fn send_json(&self, agent_id: &str, event_type: &str, data: &serde_json::Value) -> bool {
+        let event = serde_json::json!({
+            "event": event_type,
+            "data": data
+        });
+        let senders = self.senders.lock().unwrap();
+        if let Some(tx) = senders.get(agent_id) {
+            tx.send(event.to_string()).is_ok()
+        } else {
+            false
+        }
+    }
+}
+
 /// Shared application state across all handlers.
 pub struct AppState {
     pub agent_registry: AgentRegistry,
     pub message_store: MessageStore,
+    ws_registry: WsRegistry,
     pub start_time: chrono::DateTime<chrono::Utc>,
 }
 
@@ -21,6 +67,7 @@ impl AppState {
         Self {
             agent_registry: AgentRegistry::new(),
             message_store: MessageStore::new(conn),
+            ws_registry: WsRegistry::new(),
             start_time: chrono::Utc::now(),
         }
     }
@@ -174,6 +221,7 @@ async fn send_message(
 
     // Verify recipient exists
     let _recipient = state.agent_registry.get(&req.to)?;
+    let recipient = req.to.clone();
 
     let envelope = MessageEnvelope {
         message_id: String::new(),
@@ -188,6 +236,12 @@ async fn send_message(
     };
 
     let stored = state.message_store.store(envelope)?;
+
+    // Push to recipient via WebSocket if connected
+    let event_data = serde_json::to_value(&stored).unwrap_or_default();
+    state
+        .ws_registry
+        .send_json(&recipient, "message", &event_data);
 
     Ok((axum::http::StatusCode::CREATED, Json(stored)))
 }
@@ -247,13 +301,66 @@ async fn stats(
     }))
 }
 
-// WebSocket — placeholder, implemented in Task 8
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(_state): State<SharedState>,
-    Path(_agent_id): Path<String>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|_socket| async {
-        // Implemented in Task 8
-    })
+    State(state): State<SharedState>,
+    Path(agent_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    if !state.agent_registry.is_online(&agent_id) {
+        return Err(EnvoyError::AgentOffline(agent_id));
+    }
+
+    Ok(ws.on_upgrade(move |socket| handle_ws(socket, state, agent_id)))
+}
+
+async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) {
+    let mut rx = state.ws_registry.register(&agent_id);
+
+    // Send catch-up: undelivered messages for this agent
+    if let Ok(pending) = state.message_store.poll(&agent_id, 0, 100) {
+        for msg in &pending {
+            let event = serde_json::json!({
+                "event": "message",
+                "data": msg
+            });
+            if socket
+                .send(Message::Text(event.to_string().into()))
+                .await
+                .is_err()
+            {
+                state.ws_registry.unregister(&agent_id);
+                return;
+            }
+        }
+    }
+
+    // Send connected event
+    let connected = serde_json::json!({
+        "event": "agent_connected",
+        "data": { "agent_id": &agent_id }
+    });
+    let _ = socket
+        .send(Message::Text(connected.to_string().into()))
+        .await;
+
+    loop {
+        tokio::select! {
+            // Incoming events from broadcast channel
+            Ok(event_str) = rx.recv() => {
+                if socket.send(Message::Text(event_str.into())).await.is_err() {
+                    break;
+                }
+            }
+            // Incoming messages from the client (heartbeats, acknowledgements)
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(_))) => { /* client heartbeat, ignore */ }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    state.ws_registry.unregister(&agent_id);
 }

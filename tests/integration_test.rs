@@ -481,3 +481,45 @@ async fn health_endpoint() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
 }
+
+#[tokio::test]
+async fn websocket_connect_and_receive() {
+    use futures::StreamExt;
+
+    let app = test_app();
+
+    // Register an agent
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"hermes","kind":"hermes"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Start the server on a random port
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Small delay for server to start
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Connect WebSocket
+    let url = format!("ws://{}/ws/id1", addr);
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    // Should receive pending messages first (none), then agent_connected event
+    let msg = ws.next().await.unwrap().unwrap();
+    let text = msg.to_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(json["event"], "agent_connected");
+}
