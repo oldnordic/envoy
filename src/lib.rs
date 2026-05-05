@@ -29,6 +29,7 @@
 //! let new_events = engine.catch_up("hermes", "claude-hermes")?;
 //! ```
 
+pub mod agent;
 pub mod engine;
 pub mod error;
 pub mod message;
