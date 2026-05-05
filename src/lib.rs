@@ -34,6 +34,7 @@ pub mod error;
 pub mod types;
 
 pub use engine::Engine;
+pub use error::EnvoyError;
 pub use types::{
     AgentStatus, Channel, Event, EventPayload, MagellanDbState, MagellanTrace, Subscription,
 };

@@ -1,4 +1,4 @@
-use envoy::{AgentStatus, Engine, EventPayload};
+use envoy::{AgentStatus, Engine, EnvoyError, EventPayload};
 
 #[test]
 fn create_and_get_channel() {
@@ -234,4 +234,19 @@ fn magellan_trace_roundtrips() {
     assert_eq!(rt.symbols_added, vec!["fn new_func"]);
     assert_eq!(rt.db_state.as_ref().unwrap().schema_version, 12);
     assert_eq!(rt.db_state.as_ref().unwrap().symbol_count, 583);
+}
+
+#[test]
+fn error_display_messages() {
+    let err = EnvoyError::AgentNotFound("id99".into());
+    assert!(err.to_string().contains("id99"));
+
+    let err = EnvoyError::AgentOffline("id1".into());
+    assert!(err.to_string().contains("offline"));
+
+    let err = EnvoyError::MessageNotFound("m-xxx".into());
+    assert!(err.to_string().contains("m-xxx"));
+
+    let err = EnvoyError::InvalidMessage("missing parts".into());
+    assert!(err.to_string().contains("missing parts"));
 }
