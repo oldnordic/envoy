@@ -45,6 +45,9 @@ pub enum EnvoyError {
 
     #[error("too many parts: {0} exceeds 20 limit")]
     TooManyParts(usize),
+
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
 }
 
 impl IntoResponse for EnvoyError {
