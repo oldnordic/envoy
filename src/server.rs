@@ -11,14 +11,14 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
     let state = Arc::new(AppState::new(conn));
 
     let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        crate::error::EnvoyError::WsError(format!("failed to bind {addr}: {e}"))
-    })?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| crate::error::EnvoyError::WsError(format!("failed to bind {addr}: {e}")))?;
 
     println!("envoy server listening on {addr}, db={db_path}");
-    axum::serve(listener, app).await.map_err(|e| {
-        crate::error::EnvoyError::WsError(format!("server error: {e}"))
-    })?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| crate::error::EnvoyError::WsError(format!("server error: {e}")))?;
 
     Ok(())
 }

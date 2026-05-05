@@ -237,7 +237,8 @@ impl MessageStore {
 
         let rows = stmt.query_map(rusqlite::params![to, since, limit], |row| {
             let msg_type_str: String = row.get(1)?;
-            let msg_type: MessageType = serde_json::from_str(&msg_type_str).unwrap_or(MessageType::Direct);
+            let msg_type: MessageType =
+                serde_json::from_str(&msg_type_str).unwrap_or(MessageType::Direct);
             let parts_json: String = row.get(8)?;
             let parts: Vec<Part> = serde_json::from_str(&parts_json).unwrap_or_default();
 
