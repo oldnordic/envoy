@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use sqlitegraph::backend::native::v3::pubsub::{PubSubEvent, Publisher};
 use sqlitegraph::pattern_engine::PatternTriple;
 use sqlitegraph::{GraphEdge, GraphEntity, SqliteGraph};
@@ -14,9 +17,16 @@ const EDGE_SUBSCRIBES_TO: &str = "SUBSCRIBES_TO";
 
 /// The envoy coordination engine — wraps sqlitegraph's graph database
 /// and pub/sub Publisher for agent-oriented coordination.
+///
+/// Uses in-memory caches to avoid O(n) entity ID scans on hot paths
+/// (sqlitegraph 2.1.4 does not expose raw SQL publicly).
 pub struct Engine {
     graph: SqliteGraph,
     publisher: Publisher,
+    /// channel name → entity id
+    channel_cache: RefCell<HashMap<String, i64>>,
+    /// (agent_id, channel_id) → entity id
+    sub_cache: RefCell<HashMap<(String, i64), i64>>,
 }
 
 impl Engine {
@@ -24,14 +34,24 @@ impl Engine {
     pub fn open(path: &str) -> Result<Self> {
         let graph = SqliteGraph::open(path)?;
         let publisher = Publisher::new();
-        Ok(Self { graph, publisher })
+        Ok(Self {
+            graph,
+            publisher,
+            channel_cache: RefCell::new(HashMap::new()),
+            sub_cache: RefCell::new(HashMap::new()),
+        })
     }
 
     /// Open an in-memory engine for testing.
     pub fn open_in_memory() -> Result<Self> {
         let graph = SqliteGraph::open_in_memory()?;
         let publisher = Publisher::new();
-        Ok(Self { graph, publisher })
+        Ok(Self {
+            graph,
+            publisher,
+            channel_cache: RefCell::new(HashMap::new()),
+            sub_cache: RefCell::new(HashMap::new()),
+        })
     }
 
     /// Access the underlying sqlitegraph Publisher for real-time event listeners.
@@ -47,7 +67,15 @@ impl Engine {
     // ── Channels ──
 
     pub fn create_channel(&self, name: &str, description: &str) -> Result<Channel> {
-        if let Ok(_existing) = self.find_channel_entity(name) {
+        if self.channel_cache.borrow().contains_key(name) {
+            return Err(EnvoyError::ChannelAlreadyExists(name.to_string()));
+        }
+        // Fallback: check DB in case cache is cold
+        if let Ok(existing) = self.find_channel_entity(name) {
+            let _ = self
+                .channel_cache
+                .borrow_mut()
+                .insert(name.to_string(), existing.id);
             return Err(EnvoyError::ChannelAlreadyExists(name.to_string()));
         }
 
@@ -59,6 +87,8 @@ impl Engine {
             data: serde_json::json!({"description": description}),
         };
         let id = self.graph.insert_entity(&entity)?;
+
+        self.channel_cache.borrow_mut().insert(name.to_string(), id);
 
         self.publisher.emit(PubSubEvent::NodeChanged {
             node_id: id,
@@ -215,12 +245,34 @@ impl Engine {
     pub fn subscribe(&self, agent_id: &str, channel_name: &str) -> Result<Subscription> {
         let channel = self.get_channel(channel_name)?;
 
+        // Check cache first
+        let cache_key = (agent_id.to_string(), channel.id);
+        if let Some(&sub_id) = self.sub_cache.borrow().get(&cache_key) {
+            if let Ok(entity) = self.graph.get_entity(sub_id) {
+                let last_seen = entity
+                    .data
+                    .get("last_seen_sequence")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                return Ok(Subscription {
+                    agent_id: agent_id.to_string(),
+                    channel_id: channel.id,
+                    channel_name: channel.name,
+                    last_seen_sequence: last_seen,
+                });
+            }
+            // Stale cache entry: remove it
+            self.sub_cache.borrow_mut().remove(&cache_key);
+        }
+
+        // Fallback: scan entities (cold cache)
         if let Ok(existing) = self.find_subscription_entity(agent_id, channel.id) {
             let last_seen = existing
                 .data
                 .get("last_seen_sequence")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
+            self.sub_cache.borrow_mut().insert(cache_key, existing.id);
             return Ok(Subscription {
                 agent_id: agent_id.to_string(),
                 channel_id: channel.id,
@@ -254,6 +306,10 @@ impl Engine {
         };
         self.graph.insert_edge(&edge)?;
 
+        self.sub_cache
+            .borrow_mut()
+            .insert((agent_id.to_string(), channel.id), id);
+
         self.publisher.emit(PubSubEvent::NodeChanged {
             node_id: id,
             snapshot_id: 0,
@@ -280,6 +336,11 @@ impl Engine {
         }
 
         self.graph.delete_entity(sub_entity.id)?;
+
+        self.sub_cache
+            .borrow_mut()
+            .remove(&(agent_id.to_string(), channel.id));
+
         Ok(())
     }
 
@@ -363,10 +424,23 @@ impl Engine {
     // ── Internal helpers ──
 
     fn find_channel_entity(&self, name: &str) -> Result<GraphEntity> {
+        // Check cache first
+        if let Some(&id) = self.channel_cache.borrow().get(name) {
+            if let Ok(entity) = self.graph.get_entity(id) {
+                if entity.kind == KIND_CHANNEL && entity.name == name {
+                    return Ok(entity);
+                }
+            }
+            // Stale cache entry
+            self.channel_cache.borrow_mut().remove(name);
+        }
+
+        // Cold cache: scan entities
         let ids = self.graph.list_entity_ids()?;
         for id in ids {
             if let Ok(entity) = self.graph.get_entity(id) {
                 if entity.kind == KIND_CHANNEL && entity.name == name {
+                    self.channel_cache.borrow_mut().insert(name.to_string(), id);
                     return Ok(entity);
                 }
             }
@@ -375,6 +449,26 @@ impl Engine {
     }
 
     fn find_subscription_entity(&self, agent_id: &str, channel_id: i64) -> Result<GraphEntity> {
+        let cache_key = (agent_id.to_string(), channel_id);
+
+        // Check cache first
+        if let Some(&id) = self.sub_cache.borrow().get(&cache_key) {
+            if let Ok(entity) = self.graph.get_entity(id) {
+                if entity.kind == KIND_SUBSCRIPTION {
+                    let matches_agent =
+                        entity.data.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
+                    let matches_channel =
+                        entity.data.get("channel_id").and_then(|v| v.as_i64()) == Some(channel_id);
+                    if matches_agent && matches_channel {
+                        return Ok(entity);
+                    }
+                }
+            }
+            // Stale cache entry
+            self.sub_cache.borrow_mut().remove(&cache_key);
+        }
+
+        // Cold cache: scan entities
         let ids = self.graph.list_entity_ids()?;
         for id in ids {
             if let Ok(entity) = self.graph.get_entity(id) {
@@ -386,6 +480,7 @@ impl Engine {
                 let matches_channel =
                     entity.data.get("channel_id").and_then(|v| v.as_i64()) == Some(channel_id);
                 if matches_agent && matches_channel {
+                    self.sub_cache.borrow_mut().insert(cache_key, id);
                     return Ok(entity);
                 }
             }
