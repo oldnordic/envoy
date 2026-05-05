@@ -502,9 +502,7 @@ async fn websocket_connect_and_receive() {
         .unwrap();
 
     // Start the server on a random port
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -522,4 +520,149 @@ async fn websocket_connect_and_receive() {
     let text = msg.to_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(json["event"], "agent_connected");
+}
+
+#[tokio::test]
+async fn full_handoff_workflow() {
+    use envoy::message::{
+        CompletionStatus, HandoffData, MagellanTracePayload, PartContent, QualityGateResult,
+        VerificationState, WhatIsStubbed, WhatWasDone,
+    };
+    use envoy::MessageType;
+
+    let app = test_app();
+
+    // 1. Register Claude (parent)
+    let register_claude = |app: Router| async {
+        app.oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"claude","kind":"claude"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+    register_claude(app.clone()).await;
+
+    // 2. Register Claude subagent
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"implement-task-3","kind":"claude","parent_id":"id1"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 3. Subagent sends handoff to parent
+    let handoff = HandoffData {
+        completion_status: CompletionStatus::NeedsContext,
+        blocked_reason: None,
+        context_remaining_pct: 28,
+        what_was_done: vec![WhatWasDone {
+            scope: "src/engine.rs".into(),
+            change: "added publish()".into(),
+            verified: true,
+        }],
+        what_is_stubbed: vec![WhatIsStubbed {
+            location: "src/http.rs".into(),
+            reason: "context too low".into(),
+        }],
+        remaining_work: vec!["Implement HTTP server".into()],
+        verification_state: VerificationState {
+            tests_passing: 11,
+            tests_failing: 0,
+            quality_gate: QualityGateResult {
+                passed: true,
+                blocking: 0,
+                warnings: 0,
+            },
+            cargo_check_passed: true,
+        },
+        magellan_trace: MagellanTracePayload {
+            files_changed: vec!["src/engine.rs".into()],
+            symbols_added: vec!["fn publish".into()],
+            symbols_removed: vec![],
+            refs_in: Default::default(),
+            refs_out: Default::default(),
+        },
+        grounded_queries_used: vec!["magellan find --name Engine".into()],
+    };
+
+    let msg = envoy::http::SendMessageRequest {
+        msg_type: MessageType::Handoff,
+        from: "id1.1".into(),
+        to: "id1".into(),
+        task_id: Some("task-003".into()),
+        context_id: Some("ctx-001".into()),
+        parts: vec![
+            envoy::message::Part {
+                content: PartContent::Text("context at 28%, handing off".into()),
+            },
+            envoy::message::Part {
+                content: PartContent::Data(serde_json::to_value(&handoff).unwrap()),
+            },
+        ],
+    };
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&msg).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let stored: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(stored["from"], "id1.1");
+    assert_eq!(stored["to"], "id1");
+    assert_eq!(stored["type"], "handoff");
+    assert_eq!(stored["sequence_id"], 1);
+
+    // 4. Parent polls and retrieves the handoff
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/messages?to=id1&since=0&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let messages = json["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+
+    // Verify handoff data round-trips through the Data part
+    let handoff_part = &messages[0]["parts"][1];
+    let roundtripped: HandoffData = serde_json::from_value(handoff_part["data"].clone()).unwrap();
+    assert_eq!(
+        roundtripped.completion_status,
+        CompletionStatus::NeedsContext
+    );
+    assert_eq!(roundtripped.context_remaining_pct, 28);
+    assert_eq!(roundtripped.remaining_work.len(), 1);
 }

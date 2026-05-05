@@ -80,7 +80,10 @@ pub fn build_router(state: SharedState) -> Router {
     Router::new()
         // Agents
         .route("/agents", get(list_agents).post(register_agent))
-        .route("/agents/{agent_id}", get(get_agent).delete(disconnect_agent))
+        .route(
+            "/agents/{agent_id}",
+            get(get_agent).delete(disconnect_agent),
+        )
         .route("/agents/{agent_id}/messages/pending", get(pending_messages))
         // Messages
         .route("/messages", get(poll_messages).post(send_message))
@@ -103,7 +106,7 @@ pub struct RegisterRequest {
     pub kind: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SendMessageRequest {
     #[serde(rename = "type")]
     pub msg_type: MessageType,
@@ -170,9 +173,7 @@ async fn disconnect_agent(
     ))
 }
 
-async fn list_agents(
-    State(state): State<SharedState>,
-) -> Result<impl IntoResponse> {
+async fn list_agents(State(state): State<SharedState>) -> Result<impl IntoResponse> {
     let agents = state.agent_registry.list_all();
     Ok(Json(serde_json::json!({"agents": agents})))
 }
@@ -265,10 +266,7 @@ async fn poll_messages(
     let limit = query.limit.min(100);
 
     let messages = state.message_store.poll(&query.to, since, limit)?;
-    let latest_seq = messages
-        .last()
-        .map(|m| m.sequence_id)
-        .unwrap_or(since);
+    let latest_seq = messages.last().map(|m| m.sequence_id).unwrap_or(since);
 
     Ok(Json(PollResponse {
         messages,
@@ -276,9 +274,7 @@ async fn poll_messages(
     }))
 }
 
-async fn health(
-    State(state): State<SharedState>,
-) -> impl IntoResponse {
+async fn health(State(state): State<SharedState>) -> impl IntoResponse {
     let uptime = (chrono::Utc::now() - state.start_time).num_seconds();
     let online = state.agent_registry.list_online().len();
 
@@ -289,9 +285,7 @@ async fn health(
     })
 }
 
-async fn stats(
-    State(state): State<SharedState>,
-) -> Result<impl IntoResponse> {
+async fn stats(State(state): State<SharedState>) -> Result<impl IntoResponse> {
     let total = state.message_store.count_all().unwrap_or(0);
     let registered = state.agent_registry.list_all().len();
 
