@@ -223,6 +223,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/events", get(query_events))
         // Task Board
         .route("/tasks/propose", axum::routing::post(propose_task))
+        .route("/tasks/claim-next", axum::routing::post(claim_next_task))
         .route("/tasks/{id}/claim", axum::routing::post(claim_task))
         .route("/tasks/{id}/state", axum::routing::post(update_task_state))
         .route("/tasks/{id}", get(get_task))
@@ -765,6 +766,24 @@ async fn claim_task(
         &serde_json::to_value(&task).unwrap_or_default(),
     );
     Ok(Json(task))
+}
+
+async fn claim_next_task(
+    State(state): State<SharedState>,
+    Json(req): Json<task::ClaimNextRequest>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let task = state
+        .task_store
+        .claim_next(engine.graph(), &req.project, req.agent_id)?;
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &task.project,
+        "task_claimed",
+        &serde_json::to_value(&task).unwrap_or_default(),
+    );
+    Ok((axum::http::StatusCode::CREATED, Json(task)))
 }
 
 async fn update_task_state(

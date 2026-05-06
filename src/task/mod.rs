@@ -78,6 +78,12 @@ pub struct ClaimTaskRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ClaimNextRequest {
+    pub agent_id: String,
+    pub project: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdateTaskStateRequest {
     pub state: String,
     #[serde(default)]

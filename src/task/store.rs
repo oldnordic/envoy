@@ -79,6 +79,23 @@ impl TaskStore {
         })
     }
 
+    pub fn claim_next(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        project: &str,
+        agent_id: String,
+    ) -> Result<Task> {
+        let tasks = self.list(graph, project, Some(&TaskState::Proposed))?;
+        if tasks.is_empty() {
+            return Err(EnvoyError::TaskNotFound("no proposed tasks".into()));
+        }
+        let oldest = tasks
+            .into_iter()
+            .min_by_key(|t| t.created_at.clone())
+            .unwrap();
+        self.claim(graph, &oldest.id, agent_id)
+    }
+
     pub fn update_state(
         &self,
         graph: &sqlitegraph::SqliteGraph,
@@ -330,6 +347,33 @@ mod tests {
             .propose(graph, "m".into(), "B".into(), vec![a.id.clone()])
             .unwrap();
         assert_eq!(store.find_blocked_by(graph, &a.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn claim_next_oldest_proposed() {
+        let engine = Engine::open_in_memory().unwrap();
+        let graph = engine.graph();
+        let store = TaskStore::new();
+        let a = store
+            .propose(graph, "m".into(), "A".into(), vec![])
+            .unwrap();
+        let b = store
+            .propose(graph, "m".into(), "B".into(), vec![])
+            .unwrap();
+        let next = store.claim_next(graph, "m", "agent-1".into()).unwrap();
+        assert_eq!(next.id, a.id); // oldest
+        assert_eq!(next.state, TaskState::Claimed);
+        assert_eq!(next.claimed_by, Some("agent-1".into()));
+        // b still proposed
+        assert_eq!(store.get(graph, &b.id).unwrap().state, TaskState::Proposed);
+    }
+
+    #[test]
+    fn claim_next_empty_project() {
+        let engine = Engine::open_in_memory().unwrap();
+        let graph = engine.graph();
+        let store = TaskStore::new();
+        assert!(store.claim_next(graph, "no-project", "a".into()).is_err());
     }
 
     #[test]
