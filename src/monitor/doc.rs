@@ -54,10 +54,18 @@ pub async fn run_doc_monitor(
                         .subscription_store
                         .subscribers(engine.graph(), &project)
                         .unwrap_or_default();
-                    for agent_id in subs {
-                        state
-                            .ws_registry
-                            .send_json(&agent_id, "doc_event", &event_json);
+                    for agent_id in &subs {
+                        let delivered =
+                            state
+                                .ws_registry
+                                .send_json(agent_id, "doc_event", &event_json);
+                        if delivered {
+                            let _ = state.delivery_tracker.record_delivery(
+                                engine.graph(),
+                                agent_id,
+                                &event.id,
+                            );
+                        }
                     }
                 }
             }
