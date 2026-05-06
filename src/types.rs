@@ -6,6 +6,8 @@ pub struct Channel {
     pub id: i64,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 /// An immutable event in a channel's append-only log.
@@ -72,6 +74,10 @@ pub struct Subscription {
     pub channel_id: i64,
     pub channel_name: String,
     pub last_seen_sequence: i64,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 /// Engine-level statistics.

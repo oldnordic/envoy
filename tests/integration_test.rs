@@ -8,9 +8,21 @@ fn create_and_get_channel() {
         .unwrap();
     assert_eq!(channel.name, "test-channel");
     assert_eq!(channel.description, "A test channel");
+    assert!(
+        !channel.created_at.is_empty(),
+        "created_at should be set on new channel"
+    );
+    assert!(
+        channel.created_at.contains('T'),
+        "created_at should be RFC 3339"
+    );
 
     let found = engine.get_channel("test-channel").unwrap();
     assert_eq!(found.id, channel.id);
+    assert_eq!(
+        found.created_at, channel.created_at,
+        "created_at should round-trip"
+    );
 
     let by_id = engine.get_channel_by_id(channel.id).unwrap();
     assert_eq!(by_id.name, "test-channel");
@@ -139,6 +151,12 @@ fn subscribe_and_catch_up() {
     // Subscribe — should seed last_seen to current max (2)
     let sub = engine.subscribe("hermes", "coord").unwrap();
     assert_eq!(sub.last_seen_sequence, 2);
+    assert!(!sub.created_at.is_empty(), "created_at should be set");
+    assert!(!sub.updated_at.is_empty(), "updated_at should be set");
+    assert_eq!(
+        sub.created_at, sub.updated_at,
+        "created_at and updated_at should match on fresh subscription"
+    );
 
     // Publish more events after subscribing
     engine.publish("coord", "claude", payload.clone()).unwrap();
@@ -149,6 +167,14 @@ fn subscribe_and_catch_up() {
     assert_eq!(new_events.len(), 2);
     assert_eq!(new_events[0].sequence_id, 3);
     assert_eq!(new_events[1].sequence_id, 4);
+
+    // After catch_up, updated_at should be a valid RFC 3339 timestamp
+    let updated_sub = engine.get_subscription("hermes", "coord").unwrap();
+    assert!(!updated_sub.updated_at.is_empty());
+    assert!(
+        updated_sub.updated_at.contains('T'),
+        "updated_at should be RFC 3339 after catch_up"
+    );
 }
 
 #[test]
@@ -159,6 +185,14 @@ fn unsubscribe() {
     engine.subscribe("agent", "temp").unwrap();
     let subs = engine.list_subscriptions("agent").unwrap();
     assert_eq!(subs.len(), 1);
+    assert!(
+        !subs[0].created_at.is_empty(),
+        "subscription should have created_at"
+    );
+    assert!(
+        !subs[0].updated_at.is_empty(),
+        "subscription should have updated_at"
+    );
 
     engine.unsubscribe("agent", "temp").unwrap();
     let subs = engine.list_subscriptions("agent").unwrap();
@@ -256,12 +290,17 @@ fn error_display_messages() {
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::Router;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower::ServiceExt; // for oneshot
 
 fn test_app() -> Router {
-    let conn = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
-    let state = Arc::new(envoy::http::AppState::new(conn));
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+    // Leak the TempDir so the DB survives for the test duration.
+    // Integration tests are short-lived; disk cleanup happens at process exit.
+    let _ = Box::leak(Box::new(dir));
+    let engine = envoy::Engine::open(&db_path).unwrap();
+    let state = Arc::new(envoy::http::AppState::new(engine).unwrap());
     envoy::http::build_router(state)
 }
 

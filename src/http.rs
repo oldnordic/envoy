@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
+use crate::engine::Engine;
 use crate::error::{EnvoyError, Result};
 use crate::message::{MessageEnvelope, MessageStore, MessageType, Part};
 
@@ -58,18 +59,30 @@ impl WsRegistry {
 pub struct AppState {
     pub agent_registry: AgentRegistry,
     pub message_store: MessageStore,
+    engine: Arc<Mutex<Engine>>,
     ws_registry: WsRegistry,
     pub start_time: chrono::DateTime<chrono::Utc>,
 }
 
 impl AppState {
-    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
-        Self {
-            agent_registry: AgentRegistry::new(),
-            message_store: MessageStore::new(conn),
+    pub fn new(engine: Engine) -> Result<Self> {
+        let agent_registry = AgentRegistry::new(engine.graph())?;
+        Ok(Self {
+            agent_registry,
+            message_store: MessageStore::new(),
+            engine: Arc::new(Mutex::new(engine)),
             ws_registry: WsRegistry::new(),
             start_time: chrono::Utc::now(),
-        }
+        })
+    }
+
+    /// Lock the engine and run a closure with access to the shared SqliteGraph.
+    pub fn with_graph<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&sqlitegraph::SqliteGraph) -> T,
+    {
+        let engine = self.engine.lock().unwrap();
+        f(engine.graph())
     }
 }
 
@@ -157,9 +170,11 @@ async fn register_agent(
     State(state): State<SharedState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse> {
-    let info = state
-        .agent_registry
-        .register(&req.name, &req.kind, req.parent_id)?;
+    let info = state.with_graph(|g| {
+        state
+            .agent_registry
+            .register(g, &req.name, &req.kind, req.parent_id)
+    })?;
     Ok((axum::http::StatusCode::CREATED, Json(info)))
 }
 
@@ -167,7 +182,7 @@ async fn disconnect_agent(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let affected = state.agent_registry.disconnect(&agent_id)?;
+    let affected = state.with_graph(|g| state.agent_registry.disconnect(g, &agent_id))?;
     Ok(Json(
         serde_json::json!({"disconnected": true, "affected": affected}),
     ))
@@ -203,7 +218,7 @@ async fn pending_messages(
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
     // Tombstone: return undelivered messages for a disconnected agent
-    let messages = state.message_store.poll(&agent_id, 0, 100)?;
+    let messages = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100))?;
     Ok(Json(serde_json::json!({
         "messages": messages,
         "count": messages.len()
@@ -224,19 +239,17 @@ async fn send_message(
     let _recipient = state.agent_registry.get(&req.to)?;
     let recipient = req.to.clone();
 
-    let envelope = MessageEnvelope {
-        message_id: String::new(),
-        msg_type: req.msg_type,
-        from: req.from,
-        to: req.to,
-        task_id: req.task_id,
-        context_id: req.context_id,
-        timestamp: String::new(),
-        sequence_id: 0,
-        parts: req.parts,
-    };
-
-    let stored = state.message_store.store(envelope)?;
+    let stored = state.with_graph(|g| {
+        state.message_store.store(
+            g,
+            req.msg_type,
+            req.from.clone(),
+            req.to.clone(),
+            req.task_id.clone(),
+            req.context_id.clone(),
+            req.parts,
+        )
+    })?;
 
     // Push to recipient via WebSocket if connected
     let event_data = serde_json::to_value(&stored).unwrap_or_default();
@@ -251,7 +264,7 @@ async fn get_message(
     State(state): State<SharedState>,
     Path(message_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let msg = state.message_store.get(&message_id)?;
+    let msg = state.with_graph(|g| state.message_store.get(g, &message_id))?;
     Ok(Json(msg))
 }
 
@@ -265,7 +278,7 @@ async fn poll_messages(
     let since = query.since.unwrap_or(0);
     let limit = query.limit.min(100);
 
-    let messages = state.message_store.poll(&query.to, since, limit)?;
+    let messages = state.with_graph(|g| state.message_store.poll(g, &query.to, since, limit))?;
     let latest_seq = messages.last().map(|m| m.sequence_id).unwrap_or(since);
 
     Ok(Json(PollResponse {
@@ -286,7 +299,7 @@ async fn health(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 async fn stats(State(state): State<SharedState>) -> Result<impl IntoResponse> {
-    let total = state.message_store.count_all().unwrap_or(0);
+    let total = state.with_graph(|g| state.message_store.count_all(g).unwrap_or(0));
     let registered = state.agent_registry.list_all().len();
 
     Ok(Json(StatsResponse {
@@ -311,19 +324,22 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
     let mut rx = state.ws_registry.register(&agent_id);
 
     // Send catch-up: undelivered messages for this agent
-    if let Ok(pending) = state.message_store.poll(&agent_id, 0, 100) {
-        for msg in &pending {
-            let event = serde_json::json!({
-                "event": "message",
-                "data": msg
-            });
-            if socket
-                .send(Message::Text(event.to_string().into()))
-                .await
-                .is_err()
-            {
-                state.ws_registry.unregister(&agent_id);
-                return;
+    {
+        let pending = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100));
+        if let Ok(pending) = pending {
+            for msg in &pending {
+                let event = serde_json::json!({
+                    "event": "message",
+                    "data": msg
+                });
+                if socket
+                    .send(Message::Text(event.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    state.ws_registry.unregister(&agent_id);
+                    return;
+                }
             }
         }
     }
