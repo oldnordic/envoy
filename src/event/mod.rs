@@ -1,8 +1,30 @@
 pub mod bus;
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 pub const KIND_EVENT: &str = "EnvoyEvent";
+
+impl FromStr for EventType {
+    type Err = crate::error::EnvoyError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "ci_status" => Ok(Self::CiStatus),
+            "hook_result" => Ok(Self::HookResult),
+            "gate_result" => Ok(Self::GateResult),
+            "doc_sync" => Ok(Self::DocSync),
+            "task_handoff" => Ok(Self::TaskHandoff),
+            "gate_block" => Ok(Self::GateBlock),
+            "graph_refresh" => Ok(Self::GraphRefresh),
+            _ => Err(crate::error::EnvoyError::InvalidMessage(format!(
+                "unknown event type: {}",
+                s
+            ))),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -26,19 +48,6 @@ impl EventType {
             Self::TaskHandoff => "task_handoff",
             Self::GateBlock => "gate_block",
             Self::GraphRefresh => "graph_refresh",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "ci_status" => Some(Self::CiStatus),
-            "hook_result" => Some(Self::HookResult),
-            "gate_result" => Some(Self::GateResult),
-            "doc_sync" => Some(Self::DocSync),
-            "task_handoff" => Some(Self::TaskHandoff),
-            "gate_block" => Some(Self::GateBlock),
-            "graph_refresh" => Some(Self::GraphRefresh),
-            _ => None,
         }
     }
 }

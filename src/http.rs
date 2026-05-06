@@ -791,8 +791,7 @@ async fn update_task_state(
     Path(task_id): Path<String>,
     Json(req): Json<task::UpdateTaskStateRequest>,
 ) -> Result<impl IntoResponse> {
-    let new_state = TaskState::from_str(&req.state)
-        .ok_or_else(|| EnvoyError::InvalidMessage(format!("unknown state: {}", req.state)))?;
+    let new_state: TaskState = req.state.parse()?;
     let is_done = new_state == TaskState::Done;
     let engine = state.engine.lock().unwrap();
     let task =
@@ -835,7 +834,7 @@ async fn list_tasks(
     State(state): State<SharedState>,
     Query(params): Query<ListTasksQuery>,
 ) -> Result<impl IntoResponse> {
-    let filter = params.state.as_deref().and_then(TaskState::from_str);
+    let filter = params.state.as_deref().and_then(|s| s.parse().ok());
     let engine = state.engine.lock().unwrap();
     let tasks = state
         .task_store

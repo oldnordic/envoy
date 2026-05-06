@@ -18,6 +18,12 @@ pub struct AgentDependency {
 /// Follows the MessageStore pattern: methods take `&SqliteGraph` as first parameter.
 pub struct DependencyStore;
 
+impl Default for DependencyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DependencyStore {
     pub fn new() -> Self {
         Self

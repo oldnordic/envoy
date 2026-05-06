@@ -5,6 +5,12 @@ use crate::task::{Task, TaskState, KIND_TASK};
 
 pub struct TaskStore;
 
+impl Default for TaskStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskStore {
     pub fn new() -> Self {
         Self
@@ -160,7 +166,7 @@ impl TaskStore {
             .iter()
             .filter(|e| read_str(&e.data, "project") == project)
             .filter_map(|e| entity_to_task(e).ok())
-            .filter(|t| state_filter.map_or(true, |f| t.state == *f))
+            .filter(|t| state_filter.is_none_or(|f| t.state == *f))
             .collect();
         tasks.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(tasks)
@@ -233,7 +239,9 @@ fn entity_to_task(entity: &sqlitegraph::GraphEntity) -> Result<Task> {
         id: entity.id.to_string(),
         project: read_str(&entity.data, "project"),
         description: read_str(&entity.data, "description"),
-        state: TaskState::from_str(&read_str(&entity.data, "state")).unwrap_or(TaskState::Proposed),
+        state: read_str(&entity.data, "state")
+            .parse()
+            .unwrap_or(TaskState::Proposed),
         claimed_by: entity
             .data
             .get("claimed_by")

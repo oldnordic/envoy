@@ -13,6 +13,12 @@ pub const KIND_PROJECT_CFG: &str = "EnvoyProjectConfig";
 /// Stateless store for project-scoped agent subscriptions.
 pub struct SubscriptionStore;
 
+impl Default for SubscriptionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubscriptionStore {
     pub fn new() -> Self {
         Self
@@ -109,6 +115,12 @@ impl Default for ProjectConfig {
 
 /// Stateless store for per-project polling configuration.
 pub struct ProjectConfigStore;
+
+impl Default for ProjectConfigStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ProjectConfigStore {
     pub fn new() -> Self {

@@ -5,6 +5,12 @@ use crate::event::{EnvoyEvent, EventSeverity, EventType, KIND_EVENT};
 
 pub struct EventBus;
 
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventBus {
     pub fn new() -> Self {
         Self
@@ -62,7 +68,7 @@ impl EventBus {
         let mut events: Vec<EnvoyEvent> = entities
             .iter()
             .filter(|e| read_str(&e.data, "project") == project)
-            .filter(|e| since.map_or(true, |s| read_str(&e.data, "timestamp").as_str() > s))
+            .filter(|e| since.is_none_or(|s| read_str(&e.data, "timestamp").as_str() > s))
             .filter_map(|e| entity_to_event(e).ok())
             .collect();
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -78,10 +84,9 @@ impl EventBus {
         let mut purged = 0usize;
         for e in &entities {
             let ts = read_str(&e.data, "timestamp");
-            if !ts.is_empty() && ts.as_str() < cutoff.as_str() {
-                if graph.delete_entity(e.id).is_ok() {
-                    purged += 1;
-                }
+            if !ts.is_empty() && ts.as_str() < cutoff.as_str() && graph.delete_entity(e.id).is_ok()
+            {
+                purged += 1;
             }
         }
         Ok(purged)
@@ -92,7 +97,8 @@ fn entity_to_event(entity: &sqlitegraph::GraphEntity) -> Result<EnvoyEvent> {
     Ok(EnvoyEvent {
         id: entity.id.to_string(),
         project: read_str(&entity.data, "project"),
-        event_type: EventType::from_str(&read_str(&entity.data, "event_type"))
+        event_type: read_str(&entity.data, "event_type")
+            .parse()
             .unwrap_or(EventType::HookResult),
         severity: match read_str(&entity.data, "severity").as_str() {
             "warning" => EventSeverity::Warning,

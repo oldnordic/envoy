@@ -1,8 +1,28 @@
 pub mod store;
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 pub const KIND_TASK: &str = "EnvoyTask";
+
+impl FromStr for TaskState {
+    type Err = crate::error::EnvoyError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "proposed" => Ok(Self::Proposed),
+            "claimed" => Ok(Self::Claimed),
+            "in_progress" => Ok(Self::InProgress),
+            "waiting_review" => Ok(Self::WaitingReview),
+            "done" => Ok(Self::Done),
+            _ => Err(crate::error::EnvoyError::InvalidMessage(format!(
+                "unknown state: {}",
+                s
+            ))),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -22,17 +42,6 @@ impl TaskState {
             Self::InProgress => "in_progress",
             Self::WaitingReview => "waiting_review",
             Self::Done => "done",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "proposed" => Some(Self::Proposed),
-            "claimed" => Some(Self::Claimed),
-            "in_progress" => Some(Self::InProgress),
-            "waiting_review" => Some(Self::WaitingReview),
-            "done" => Some(Self::Done),
-            _ => None,
         }
     }
 

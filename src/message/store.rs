@@ -7,6 +7,12 @@ const KIND_MSG_SEQ_COUNTER: &str = "EnvoyMsgSeqCounter";
 /// Stateless message store. All methods take `&SqliteGraph` for the shared connection.
 pub struct MessageStore;
 
+impl Default for MessageStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MessageStore {
     pub fn new() -> Self {
         Self

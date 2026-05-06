@@ -476,9 +476,7 @@ mod tests {
         let graph = engine.graph();
         let registry = AgentRegistry::new(graph).unwrap();
 
-        let info = registry
-            .register(graph, "test1".into(), "worker".into(), None)
-            .unwrap();
+        let info = registry.register(graph, "test1", "worker", None).unwrap();
         let status = crate::status::AgentStatusSnapshot {
             state: crate::status::AgentState::Working,
             task_id: Some("task-1".into()),
@@ -502,9 +500,7 @@ mod tests {
         let graph = engine.graph();
         let registry = AgentRegistry::new(graph).unwrap();
 
-        let info = registry
-            .register(graph, "stale1".into(), "worker".into(), None)
-            .unwrap();
+        let info = registry.register(graph, "stale1", "worker", None).unwrap();
         // Never sends heartbeat — should be stale
         let stale = registry.get_stale_agents(0); // threshold=0 means immediately stale
         assert!(stale.iter().any(|a| a.agent_id == info.agent_id));
