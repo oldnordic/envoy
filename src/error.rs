@@ -61,6 +61,28 @@ pub enum EnvoyError {
 
     #[error("dependency not found: {0}")]
     DependencyNotFound(String),
+
+    #[error("task not found: {0}")]
+    TaskNotFound(String),
+
+    #[error("task already claimed: {0} by {1}")]
+    TaskAlreadyClaimed(String, String),
+
+    #[error("invalid task state transition: {task_id} from {from} to {to}")]
+    InvalidTaskState {
+        task_id: String,
+        from: String,
+        to: String,
+    },
+
+    #[error("not task claimant: agent {agent} does not own task {task_id}")]
+    NotTaskClaimant { agent: String, task_id: String },
+
+    #[error("project config not found: {0}")]
+    ProjectConfigNotFound(String),
+
+    #[error("subscription not found: {0} for project {1}")]
+    SubscriptionNotFound(String, String),
 }
 
 impl IntoResponse for EnvoyError {
@@ -78,6 +100,12 @@ impl IntoResponse for EnvoyError {
             Self::StaleAgent { .. } => (StatusCode::OK, "STALE_AGENT"),
             Self::DuplicateDependency { .. } => (StatusCode::CONFLICT, "DUPLICATE_DEPENDENCY"),
             Self::DependencyNotFound(_) => (StatusCode::NOT_FOUND, "DEPENDENCY_NOT_FOUND"),
+            Self::TaskNotFound(_) => (StatusCode::NOT_FOUND, "TASK_NOT_FOUND"),
+            Self::TaskAlreadyClaimed(_, _) => (StatusCode::CONFLICT, "TASK_ALREADY_CLAIMED"),
+            Self::InvalidTaskState { .. } => (StatusCode::CONFLICT, "INVALID_TASK_STATE"),
+            Self::NotTaskClaimant { .. } => (StatusCode::FORBIDDEN, "NOT_TASK_CLAIMANT"),
+            Self::ProjectConfigNotFound(_) => (StatusCode::NOT_FOUND, "PROJECT_CONFIG_NOT_FOUND"),
+            Self::SubscriptionNotFound(_, _) => (StatusCode::NOT_FOUND, "SUBSCRIPTION_NOT_FOUND"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         };
 

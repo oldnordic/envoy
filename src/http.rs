@@ -12,16 +12,21 @@ use crate::agent::AgentRegistry;
 use crate::dependency::DependencyStore;
 use crate::engine::Engine;
 use crate::error::{EnvoyError, Result};
+use crate::event::bus::EventBus;
+use crate::event::{self, EventSeverity, EventType};
 use crate::message::{MessageEnvelope, MessageStore, MessageType, Part};
+use crate::monitor::{ProjectConfig, ProjectConfigStore, SubscriptionStore};
 use crate::status::NudgeConfig;
+use crate::task::store::TaskStore;
+use crate::task::{self, TaskState};
 
 /// Registry of active WebSocket senders, keyed by agent_id.
-struct WsRegistry {
+pub(crate) struct WsRegistry {
     senders: Mutex<HashMap<String, broadcast::Sender<String>>>,
 }
 
 impl WsRegistry {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             senders: Mutex::new(HashMap::new()),
         }
@@ -43,7 +48,12 @@ impl WsRegistry {
         senders.remove(agent_id);
     }
 
-    fn send_json(&self, agent_id: &str, event_type: &str, data: &serde_json::Value) -> bool {
+    pub(crate) fn send_json(
+        &self,
+        agent_id: &str,
+        event_type: &str,
+        data: &serde_json::Value,
+    ) -> bool {
         let event = serde_json::json!({
             "event": event_type,
             "data": data
@@ -62,8 +72,12 @@ pub struct AppState {
     pub agent_registry: AgentRegistry,
     pub dependency_store: DependencyStore,
     pub message_store: MessageStore,
-    engine: Arc<Mutex<Engine>>,
-    ws_registry: WsRegistry,
+    pub event_bus: EventBus,
+    pub task_store: TaskStore,
+    pub subscription_store: SubscriptionStore,
+    pub project_config_store: ProjectConfigStore,
+    pub(crate) engine: Arc<Mutex<Engine>>,
+    pub(crate) ws_registry: WsRegistry,
     pub nudge_config: Mutex<NudgeConfig>,
     pub start_time: chrono::DateTime<chrono::Utc>,
 }
@@ -75,6 +89,10 @@ impl AppState {
             agent_registry,
             dependency_store: DependencyStore::new(),
             message_store: MessageStore::new(),
+            event_bus: EventBus::new(),
+            task_store: TaskStore::new(),
+            subscription_store: SubscriptionStore::new(),
+            project_config_store: ProjectConfigStore::new(),
             engine: Arc::new(Mutex::new(engine)),
             ws_registry: WsRegistry::new(),
             nudge_config: Mutex::new(NudgeConfig::default()),
@@ -140,6 +158,24 @@ pub async fn run_nudge_loop(state: Arc<AppState>) {
                         &unblock_msg,
                     );
                 }
+
+                // Reclaim tasks claimed by stale agents
+                if let Ok(reclaimed) = state
+                    .task_store
+                    .reclaim_stale(engine.graph(), &agent.agent_id)
+                {
+                    for task_id in &reclaimed {
+                        let reclaim_msg = serde_json::json!({
+                            "task_id": task_id,
+                            "message": format!("Task reclaimed — {} is stale", agent.agent_id),
+                        });
+                        state.ws_registry.send_json(
+                            &agent.agent_id,
+                            "task_reclaimed",
+                            &reclaim_msg,
+                        );
+                    }
+                }
             }
         }
     }
@@ -178,6 +214,30 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/nudge-config",
             get(get_nudge_config).post(update_nudge_config),
+        )
+        // Event Bus
+        .route("/events/hook", axum::routing::post(ingest_hook_event))
+        .route("/events/gate", axum::routing::post(ingest_gate_event))
+        .route("/events/ci", axum::routing::post(ingest_ci_event))
+        .route("/events/doc", axum::routing::post(ingest_doc_event))
+        .route("/events", get(query_events))
+        // Task Board
+        .route("/tasks/propose", axum::routing::post(propose_task))
+        .route("/tasks/{id}/claim", axum::routing::post(claim_task))
+        .route("/tasks/{id}/state", axum::routing::post(update_task_state))
+        .route("/tasks/{id}", get(get_task))
+        .route("/tasks", get(list_tasks))
+        // Subscriptions
+        .route("/subscriptions", axum::routing::post(subscribe_agent))
+        .route(
+            "/subscriptions/{agent_id}/{project}",
+            axum::routing::delete(unsubscribe_agent),
+        )
+        .route("/subscriptions/{agent_id}", get(list_subscriptions))
+        // Project Config
+        .route(
+            "/projects/{name}/config",
+            get(get_project_config).post(set_project_config),
         )
         // WebSocket
         .route("/ws/{agent_id}", get(ws_handler))
@@ -497,6 +557,362 @@ async fn get_nudge_config(State(state): State<SharedState>) -> Result<impl IntoR
     Ok(Json(cfg))
 }
 
+// ── Event handlers ──
+
+async fn ingest_hook_event(
+    State(state): State<SharedState>,
+    Json(req): Json<event::HookEventRequest>,
+) -> Result<impl IntoResponse> {
+    let severity = if req.exit_code == 2 {
+        EventSeverity::Blocking
+    } else if req.exit_code != 0 {
+        EventSeverity::Warning
+    } else {
+        EventSeverity::Info
+    };
+    let engine = state.engine.lock().unwrap();
+    let event = state.event_bus.ingest(
+        engine.graph(),
+        req.project.clone(),
+        EventType::HookResult,
+        severity,
+        format!("hook:{}", req.hook_name),
+        format!("Hook {} exited {}", req.hook_name, req.exit_code),
+        serde_json::json!({
+            "hook_name": req.hook_name,
+            "exit_code": req.exit_code,
+            "output_preview": &req.output[..req.output.len().min(200)],
+        }),
+    )?;
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &req.project,
+        "hook_event",
+        &serde_json::to_value(&event).unwrap_or_default(),
+    );
+    Ok((axum::http::StatusCode::CREATED, Json(event)))
+}
+
+async fn ingest_gate_event(
+    State(state): State<SharedState>,
+    Json(req): Json<event::GateEventRequest>,
+) -> Result<impl IntoResponse> {
+    let severity = if req.gates_passed < req.gates_total {
+        EventSeverity::Warning
+    } else {
+        EventSeverity::Info
+    };
+    let engine = state.engine.lock().unwrap();
+    let event = state.event_bus.ingest(
+        engine.graph(),
+        req.project.clone(),
+        EventType::GateResult,
+        severity,
+        "gate:quality".into(),
+        format!("{}/{} passed", req.gates_passed, req.gates_total),
+        serde_json::json!({
+            "gates_passed": req.gates_passed,
+            "gates_total": req.gates_total,
+            "failures": req.failures,
+        }),
+    )?;
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &req.project,
+        "gate_event",
+        &serde_json::to_value(&event).unwrap_or_default(),
+    );
+    Ok((axum::http::StatusCode::CREATED, Json(event)))
+}
+
+async fn ingest_ci_event(
+    State(state): State<SharedState>,
+    Json(req): Json<event::CiEventRequest>,
+) -> Result<impl IntoResponse> {
+    let severity = match req.conclusion.as_deref() {
+        Some("success") => EventSeverity::Info,
+        Some("failure") => EventSeverity::Blocking,
+        _ => EventSeverity::Info,
+    };
+    let engine = state.engine.lock().unwrap();
+    let event = state.event_bus.ingest(
+        engine.graph(),
+        req.project.clone(),
+        EventType::CiStatus,
+        severity,
+        "ci:github".into(),
+        format!(
+            "CI {}: {}",
+            req.run_id,
+            req.conclusion.as_deref().unwrap_or("in_progress")
+        ),
+        serde_json::json!({
+            "run_id": req.run_id,
+            "status": req.status,
+            "conclusion": req.conclusion,
+            "head_branch": req.head_branch,
+            "display_title": req.display_title,
+        }),
+    )?;
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &req.project,
+        "ci_event",
+        &serde_json::to_value(&event).unwrap_or_default(),
+    );
+    Ok((axum::http::StatusCode::CREATED, Json(event)))
+}
+
+async fn ingest_doc_event(
+    State(state): State<SharedState>,
+    Json(req): Json<event::DocEventRequest>,
+) -> Result<impl IntoResponse> {
+    let severity = if req.last_updated_seconds > 86400 {
+        EventSeverity::Warning
+    } else {
+        EventSeverity::Info
+    };
+    let engine = state.engine.lock().unwrap();
+    let event = state.event_bus.ingest(
+        engine.graph(),
+        req.project.clone(),
+        EventType::DocSync,
+        severity,
+        "doc:wiki".into(),
+        format!("Docs last updated {}s ago", req.last_updated_seconds),
+        serde_json::json!({
+            "doc_files": req.doc_files,
+            "last_updated_seconds": req.last_updated_seconds,
+        }),
+    )?;
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &req.project,
+        "doc_event",
+        &serde_json::to_value(&event).unwrap_or_default(),
+    );
+    Ok((axum::http::StatusCode::CREATED, Json(event)))
+}
+
+#[derive(Debug, Deserialize)]
+struct EventQueryParams {
+    project: String,
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+async fn query_events(
+    State(state): State<SharedState>,
+    Query(params): Query<EventQueryParams>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let events = state.event_bus.query(
+        engine.graph(),
+        &params.project,
+        params.since.as_deref(),
+        Some(params.limit.unwrap_or(50).min(100)),
+    )?;
+    drop(engine);
+    Ok(Json(serde_json::json!({
+        "events": events,
+        "count": events.len(),
+    })))
+}
+
+// ── Task handlers ──
+
+async fn propose_task(
+    State(state): State<SharedState>,
+    Json(req): Json<task::ProposeTaskRequest>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let task = state.task_store.propose(
+        engine.graph(),
+        req.project.clone(),
+        req.description,
+        req.blocked_by,
+    )?;
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &req.project,
+        "task_proposed",
+        &serde_json::to_value(&task).unwrap_or_default(),
+    );
+    Ok((axum::http::StatusCode::CREATED, Json(task)))
+}
+
+async fn claim_task(
+    State(state): State<SharedState>,
+    Path(task_id): Path<String>,
+    Json(req): Json<task::ClaimTaskRequest>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let task = state
+        .task_store
+        .claim(engine.graph(), &task_id, req.agent_id)?;
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &task.project,
+        "task_claimed",
+        &serde_json::to_value(&task).unwrap_or_default(),
+    );
+    Ok(Json(task))
+}
+
+async fn update_task_state(
+    State(state): State<SharedState>,
+    Path(task_id): Path<String>,
+    Json(req): Json<task::UpdateTaskStateRequest>,
+) -> Result<impl IntoResponse> {
+    let new_state = TaskState::from_str(&req.state)
+        .ok_or_else(|| EnvoyError::InvalidMessage(format!("unknown state: {}", req.state)))?;
+    let is_done = new_state == TaskState::Done;
+    let engine = state.engine.lock().unwrap();
+    let task =
+        state
+            .task_store
+            .update_state(engine.graph(), &task_id, new_state, req.checkpoint, None)?;
+    if is_done {
+        let blocked = state.task_store.find_blocked_by(engine.graph(), &task_id)?;
+        for bt in &blocked {
+            let notify = serde_json::json!({
+                "resolved_dependency": task_id,
+                "task_id": bt.id,
+                "message": format!("Dependency {} resolved — can proceed", task_id),
+            });
+            if let Some(ref claimant) = bt.claimed_by {
+                state
+                    .ws_registry
+                    .send_json(claimant, "dependency_resolved", &notify);
+            }
+        }
+    }
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &task.project,
+        "task_state_changed",
+        &serde_json::to_value(&task).unwrap_or_default(),
+    );
+    Ok(Json(task))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListTasksQuery {
+    project: String,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+async fn list_tasks(
+    State(state): State<SharedState>,
+    Query(params): Query<ListTasksQuery>,
+) -> Result<impl IntoResponse> {
+    let filter = params.state.as_deref().and_then(TaskState::from_str);
+    let engine = state.engine.lock().unwrap();
+    let tasks = state
+        .task_store
+        .list(engine.graph(), &params.project, filter.as_ref())?;
+    drop(engine);
+    Ok(Json(serde_json::json!({
+        "tasks": tasks,
+        "count": tasks.len(),
+    })))
+}
+
+async fn get_task(
+    State(state): State<SharedState>,
+    Path(task_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let task = state.task_store.get(engine.graph(), &task_id)?;
+    drop(engine);
+    Ok(Json(task))
+}
+
+// ── Subscription handlers ──
+
+async fn subscribe_agent(
+    State(state): State<SharedState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse> {
+    let agent_id = body["agent_id"].as_str().unwrap_or("");
+    let project = body["project"].as_str().unwrap_or("");
+    if agent_id.is_empty() || project.is_empty() {
+        return Err(EnvoyError::InvalidMessage(
+            "agent_id and project required".into(),
+        ));
+    }
+    let engine = state.engine.lock().unwrap();
+    state
+        .subscription_store
+        .subscribe(engine.graph(), agent_id, project)?;
+    drop(engine);
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({"subscribed": true, "agent_id": agent_id, "project": project})),
+    ))
+}
+
+async fn unsubscribe_agent(
+    State(state): State<SharedState>,
+    Path((agent_id, project)): Path<(String, String)>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    state
+        .subscription_store
+        .unsubscribe(engine.graph(), &agent_id, &project)?;
+    drop(engine);
+    Ok(Json(serde_json::json!({"unsubscribed": true})))
+}
+
+async fn list_subscriptions(
+    State(state): State<SharedState>,
+    Path(agent_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let subs = state.subscription_store.list(engine.graph(), &agent_id)?;
+    drop(engine);
+    Ok(Json(
+        serde_json::json!({"agent_id": agent_id, "subscriptions": subs}),
+    ))
+}
+
+// ── Project config handlers ──
+
+async fn get_project_config(
+    State(state): State<SharedState>,
+    Path(project): Path<String>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let cfg = state.project_config_store.get(engine.graph(), &project)?;
+    drop(engine);
+    Ok(Json(cfg))
+}
+
+async fn set_project_config(
+    State(state): State<SharedState>,
+    Path(project): Path<String>,
+    Json(cfg): Json<ProjectConfig>,
+) -> Result<impl IntoResponse> {
+    let mut cfg = cfg;
+    cfg.project = project.clone();
+    let engine = state.engine.lock().unwrap();
+    state.project_config_store.set(engine.graph(), &cfg)?;
+    drop(engine);
+    Ok(Json(
+        serde_json::json!({"configured": true, "project": project}),
+    ))
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
@@ -575,4 +991,23 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
     }
 
     state.ws_registry.unregister(&agent_id);
+}
+
+/// Broadcast an event to all agents subscribed to a project.
+fn broadcast_to_project(
+    state: &SharedState,
+    project: &str,
+    event_type: &str,
+    data: &serde_json::Value,
+) {
+    let subs = {
+        let engine = state.engine.lock().unwrap();
+        state
+            .subscription_store
+            .subscribers(engine.graph(), project)
+            .unwrap_or_default()
+    };
+    for agent_id in subs {
+        state.ws_registry.send_json(&agent_id, event_type, data);
+    }
 }

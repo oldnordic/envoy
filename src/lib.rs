@@ -8,10 +8,13 @@ pub mod agent;
 pub mod dependency;
 pub mod engine;
 pub mod error;
+pub mod event;
 pub mod http;
 pub mod message;
+pub mod monitor;
 pub mod server;
 pub mod status;
+pub mod task;
 pub mod types;
 
 // Core types
@@ -32,4 +35,6 @@ pub use message::{
 };
 
 pub use error::EnvoyError;
+pub use event::{EnvoyEvent, EventSeverity, EventType};
 pub use http::AppState;
+pub use task::{Task, TaskState};
