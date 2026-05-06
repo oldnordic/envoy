@@ -39,6 +39,19 @@ pub struct AgentStatusSnapshot {
     pub working_on: String,
 }
 
+impl Default for AgentStatusSnapshot {
+    fn default() -> Self {
+        Self {
+            state: AgentState::Working,
+            task_id: None,
+            blocked_reason: None,
+            waiting_on_agent: None,
+            checkpoint: None,
+            working_on: "heartbeat via WS".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatRequest {
     pub agent_id: String,

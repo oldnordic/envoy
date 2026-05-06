@@ -936,12 +936,6 @@ async fn ws_handler(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    // WS connection is proof of being online. Mark connecting agent as active.
-    // Auto-registers if this is a first-time agent.
-    if !state.agent_registry.is_online(&agent_id) {
-        let engine = state.engine.lock().unwrap();
-        drop(engine);
-    }
     {
         let engine = state.engine.lock().unwrap();
         let _ = state.agent_registry.heartbeat(
@@ -1059,13 +1053,27 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
                         if let Ok(hb) = serde_json::from_str::<serde_json::Value>(&text) {
                             match hb.get("type").and_then(|v| v.as_str()) {
                                 Some("heartbeat") => {
+                                    let mut status: Option<crate::status::AgentStatusSnapshot> = None;
                                     if let Some(data) = hb.get("data") {
-                                        if let Ok(status) = serde_json::from_value::<crate::status::AgentStatusSnapshot>(data.clone()) {
-                                            let engine = state.engine.lock().unwrap();
-                                            let _ = state.agent_registry.heartbeat(engine.graph(), &agent_id, status);
-                                            drop(engine);
-                                        }
+                                        status = serde_json::from_value::<crate::status::AgentStatusSnapshot>(data.clone()).ok();
                                     }
+                                    let accepted = if let Some(ref st) = status {
+                                        let engine = state.engine.lock().unwrap();
+                                        state.agent_registry.heartbeat(engine.graph(), &agent_id, st.clone()).is_ok()
+                                    } else {
+                                        let engine = state.engine.lock().unwrap();
+                                        state.agent_registry.heartbeat(engine.graph(), &agent_id,
+                                            crate::status::AgentStatusSnapshot::default()).is_ok()
+                                    };
+                                    let _ = socket.send(Message::Text(
+                                        serde_json::json!({
+                                            "type": "heartbeat_ack",
+                                            "data": {
+                                                "accepted": accepted,
+                                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                            }
+                                        }).to_string().into()
+                                    )).await;
                                     continue;
                                 }
                                 Some("ping") => {
