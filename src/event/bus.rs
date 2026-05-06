@@ -1,7 +1,102 @@
+use std::collections::HashSet;
+
 use sqlitegraph::GraphEntity;
 
 use crate::error::Result;
 use crate::event::{EnvoyEvent, EventSeverity, EventType, KIND_EVENT};
+
+pub const KIND_DELIVERY: &str = "EnvoyEventDelivery";
+
+/// Tracks per-agent event delivery so offline agents get precise replay.
+pub struct DeliveryTracker;
+
+impl Default for DeliveryTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeliveryTracker {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Record that an event was delivered to an agent.
+    pub fn record_delivery(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        agent_id: &str,
+        event_id: &str,
+    ) -> Result<()> {
+        let name = format!("dlv-{}-{}", agent_id, event_id);
+        if graph
+            .find_entity_by_kind_and_name(KIND_DELIVERY, &name)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let entity = GraphEntity {
+            id: 0,
+            kind: KIND_DELIVERY.to_string(),
+            name,
+            file_path: None,
+            data: serde_json::json!({
+                "agent_id": agent_id,
+                "event_id": event_id,
+                "delivered_at": now,
+            }),
+        };
+        graph.insert_entity(&entity)?;
+        Ok(())
+    }
+
+    /// Get events not yet delivered to an agent for a project.
+    pub fn get_undelivered(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        agent_id: &str,
+        project: &str,
+        limit: Option<i64>,
+    ) -> Result<Vec<EnvoyEvent>> {
+        let events = graph.find_entities_by_kind(KIND_EVENT)?;
+        let deliveries = graph.find_entities_by_kind(KIND_DELIVERY)?;
+
+        let delivered_ids: HashSet<String> = deliveries
+            .iter()
+            .filter(|d| read_str(&d.data, "agent_id") == agent_id)
+            .map(|d| read_str(&d.data, "event_id"))
+            .collect();
+
+        let mut undelivered: Vec<EnvoyEvent> = events
+            .iter()
+            .filter(|e| read_str(&e.data, "project") == project)
+            .filter(|e| !delivered_ids.contains(&e.id.to_string()))
+            .filter_map(|e| entity_to_event(e).ok())
+            .collect();
+
+        undelivered.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        if let Some(limit) = limit {
+            undelivered.truncate(limit as usize);
+        }
+        Ok(undelivered)
+    }
+
+    /// Clean up delivery records older than 24h.
+    pub fn purge_deliveries(&self, graph: &sqlitegraph::SqliteGraph) -> Result<usize> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let deliveries = graph.find_entities_by_kind(KIND_DELIVERY)?;
+        let mut purged = 0usize;
+        for d in &deliveries {
+            let ts = read_str(&d.data, "delivered_at");
+            if !ts.is_empty() && ts.as_str() < cutoff.as_str() && graph.delete_entity(d.id).is_ok()
+            {
+                purged += 1;
+            }
+        }
+        Ok(purged)
+    }
+}
 
 pub struct EventBus;
 
@@ -127,6 +222,73 @@ fn read_str(data: &serde_json::Value, key: &str) -> String {
 mod tests {
     use super::*;
     use crate::engine::Engine;
+
+    #[test]
+    fn delivery_tracker_records_and_queries_undelivered() {
+        let engine = Engine::open_in_memory().unwrap();
+        let graph = engine.graph();
+        let bus = EventBus::new();
+        let tracker = DeliveryTracker::new();
+
+        let evt = bus
+            .ingest(
+                graph,
+                "magellan".into(),
+                EventType::CiStatus,
+                EventSeverity::Info,
+                "ci".into(),
+                "test".into(),
+                serde_json::json!({}),
+            )
+            .unwrap();
+
+        // Before delivery: event should be undelivered
+        let undelivered = tracker
+            .get_undelivered(graph, "agent-1", "magellan", None)
+            .unwrap();
+        assert_eq!(undelivered.len(), 1);
+        assert_eq!(undelivered[0].id, evt.id);
+
+        // Record delivery
+        tracker.record_delivery(graph, "agent-1", &evt.id).unwrap();
+
+        // After delivery: event should not appear
+        let undelivered = tracker
+            .get_undelivered(graph, "agent-1", "magellan", None)
+            .unwrap();
+        assert!(undelivered.is_empty());
+
+        // Other agent still hasn't received it
+        let undelivered = tracker
+            .get_undelivered(graph, "agent-2", "magellan", None)
+            .unwrap();
+        assert_eq!(undelivered.len(), 1);
+    }
+
+    #[test]
+    fn delivery_tracker_respects_project_boundary() {
+        let engine = Engine::open_in_memory().unwrap();
+        let graph = engine.graph();
+        let bus = EventBus::new();
+        let tracker = DeliveryTracker::new();
+
+        bus.ingest(
+            graph,
+            "envoy".into(),
+            EventType::DocSync,
+            EventSeverity::Info,
+            "doc".into(),
+            "test".into(),
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+        // Agent subscribed to magellan shouldn't see envoy events
+        let undelivered = tracker
+            .get_undelivered(graph, "agent-1", "magellan", None)
+            .unwrap();
+        assert!(undelivered.is_empty());
+    }
 
     #[test]
     fn ingest_and_query_events() {

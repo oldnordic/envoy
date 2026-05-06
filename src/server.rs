@@ -18,7 +18,7 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
         run_nudge_loop(nudge_state).await;
     });
 
-    // Background event purge (every hour)
+    // Background event + delivery purge (every hour)
     let purge_state = state.clone();
     tokio::spawn(async move {
         loop {
@@ -27,6 +27,14 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
                 if let Ok(purged) = purge_state.event_bus.purge_old_events(engine.graph()) {
                     if purged > 0 {
                         eprintln!("purged {} events older than 24h", purged);
+                    }
+                }
+                if let Ok(purged) = purge_state
+                    .delivery_tracker
+                    .purge_deliveries(engine.graph())
+                {
+                    if purged > 0 {
+                        eprintln!("purged {} delivery records older than 24h", purged);
                     }
                 }
             }

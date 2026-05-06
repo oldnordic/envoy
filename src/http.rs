@@ -12,7 +12,7 @@ use crate::agent::AgentRegistry;
 use crate::dependency::DependencyStore;
 use crate::engine::Engine;
 use crate::error::{EnvoyError, Result};
-use crate::event::bus::EventBus;
+use crate::event::bus::{DeliveryTracker, EventBus};
 use crate::event::{self, EventSeverity, EventType};
 use crate::message::{MessageEnvelope, MessageStore, MessageType, Part};
 use crate::monitor::{ProjectConfig, ProjectConfigStore, SubscriptionStore};
@@ -73,6 +73,7 @@ pub struct AppState {
     pub dependency_store: DependencyStore,
     pub message_store: MessageStore,
     pub event_bus: EventBus,
+    pub delivery_tracker: DeliveryTracker,
     pub task_store: TaskStore,
     pub subscription_store: SubscriptionStore,
     pub project_config_store: ProjectConfigStore,
@@ -90,6 +91,7 @@ impl AppState {
             dependency_store: DependencyStore::new(),
             message_store: MessageStore::new(),
             event_bus: EventBus::new(),
+            delivery_tracker: DeliveryTracker::new(),
             task_store: TaskStore::new(),
             subscription_store: SubscriptionStore::new(),
             project_config_store: ProjectConfigStore::new(),
@@ -976,10 +978,8 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
         }
     }
 
-    // Catch-up: recent events for subscribed projects (reconnect replay)
+    // Catch-up: undelivered events for subscribed projects (dead-letter replay)
     {
-        let since = (chrono::Utc::now() - chrono::Duration::minutes(15)).to_rfc3339();
-        // Collect all catch-up payloads first (no await across MutexGuard)
         let catchup_events: Vec<serde_json::Value> = {
             let engine = state.engine.lock().unwrap();
             let projects = state
@@ -988,11 +988,12 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
                 .unwrap_or_default();
             let mut payloads = Vec::new();
             for project in &projects {
-                if let Ok(events) =
-                    state
-                        .event_bus
-                        .query(engine.graph(), project, Some(&since), Some(50))
-                {
+                if let Ok(events) = state.delivery_tracker.get_undelivered(
+                    engine.graph(),
+                    &agent_id,
+                    project,
+                    Some(50),
+                ) {
                     for evt in &events {
                         if let Ok(payload) = serde_json::to_value(evt) {
                             payloads.push(
@@ -1012,6 +1013,21 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
             {
                 state.ws_registry.unregister(&agent_id);
                 return;
+            }
+        }
+        // Mark catch-up events as delivered
+        {
+            let engine = state.engine.lock().unwrap();
+            for msg in &catchup_events {
+                if let Some(eid) = msg
+                    .get("data")
+                    .and_then(|d| d.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    let _ = state
+                        .delivery_tracker
+                        .record_delivery(engine.graph(), &agent_id, eid);
+                }
             }
         }
     }
@@ -1110,7 +1126,18 @@ fn broadcast_to_project(
             .subscribers(engine.graph(), project)
             .unwrap_or_default()
     };
-    for agent_id in subs {
-        state.ws_registry.send_json(&agent_id, event_type, data);
+    // Extract event ID from data for delivery tracking
+    let event_id = data.get("id").and_then(|v| v.as_str());
+    for agent_id in &subs {
+        let delivered = state.ws_registry.send_json(agent_id, event_type, data);
+        // Record delivery so offline agents get precise replay on reconnect
+        if delivered {
+            if let Some(eid) = event_id {
+                let engine = state.engine.lock().unwrap();
+                let _ = state
+                    .delivery_tracker
+                    .record_delivery(engine.graph(), agent_id, eid);
+            }
+        }
     }
 }
