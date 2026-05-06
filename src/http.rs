@@ -937,8 +937,26 @@ async fn ws_handler(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
+    // WS connection is proof of being online. Mark connecting agent as active.
+    // Auto-registers if this is a first-time agent.
     if !state.agent_registry.is_online(&agent_id) {
-        return Err(EnvoyError::AgentOffline(agent_id));
+        let engine = state.engine.lock().unwrap();
+        drop(engine);
+    }
+    {
+        let engine = state.engine.lock().unwrap();
+        let _ = state.agent_registry.heartbeat(
+            engine.graph(),
+            &agent_id,
+            crate::status::AgentStatusSnapshot {
+                state: crate::status::AgentState::Working,
+                task_id: None,
+                blocked_reason: None,
+                waiting_on_agent: None,
+                checkpoint: Some("ws_connected".into()),
+                working_on: "connected via WS".into(),
+            },
+        );
     }
 
     Ok(ws.on_upgrade(move |socket| handle_ws(socket, state, agent_id)))
@@ -947,15 +965,12 @@ async fn ws_handler(
 async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) {
     let mut rx = state.ws_registry.register(&agent_id);
 
-    // Send catch-up: undelivered messages for this agent
+    // Catch-up: undelivered messages for this agent
     {
         let pending = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100));
         if let Ok(pending) = pending {
             for msg in &pending {
-                let event = serde_json::json!({
-                    "event": "message",
-                    "data": msg
-                });
+                let event = serde_json::json!({"event": "message", "data": msg});
                 if socket
                     .send(Message::Text(event.to_string().into()))
                     .await
@@ -968,7 +983,47 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
         }
     }
 
-    // Send connected event
+    // Catch-up: recent events for subscribed projects (reconnect replay)
+    {
+        let since = (chrono::Utc::now() - chrono::Duration::minutes(15)).to_rfc3339();
+        // Collect all catch-up payloads first (no await across MutexGuard)
+        let catchup_events: Vec<serde_json::Value> = {
+            let engine = state.engine.lock().unwrap();
+            let projects = state
+                .subscription_store
+                .list(engine.graph(), &agent_id)
+                .unwrap_or_default();
+            let mut payloads = Vec::new();
+            for project in &projects {
+                if let Ok(events) =
+                    state
+                        .event_bus
+                        .query(engine.graph(), project, Some(&since), Some(50))
+                {
+                    for evt in &events {
+                        if let Ok(payload) = serde_json::to_value(evt) {
+                            payloads.push(
+                                serde_json::json!({"event": "event_catchup", "data": payload}),
+                            );
+                        }
+                    }
+                }
+            }
+            payloads
+        };
+        for msg in &catchup_events {
+            if socket
+                .send(Message::Text(msg.to_string().into()))
+                .await
+                .is_err()
+            {
+                state.ws_registry.unregister(&agent_id);
+                return;
+            }
+        }
+    }
+
+    // Connected event
     let connected = serde_json::json!({
         "event": "agent_connected",
         "data": { "agent_id": &agent_id }
@@ -979,26 +1034,48 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
 
     loop {
         tokio::select! {
-            // Incoming events from broadcast channel
-            Ok(event_str) = rx.recv() => {
-                if socket.send(Message::Text(event_str.into())).await.is_err() {
-                    break;
+            result = rx.recv() => {
+                match result {
+                    Ok(event_str) => {
+                        if socket.send(Message::Text(event_str.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Channel overflowed — re-subscribe at current position
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let _ = socket.send(Message::Text(
+                            serde_json::json!({
+                                "event": "channel_lagged",
+                                "data": { "skipped": n }
+                            }).to_string().into()
+                        )).await;
+                        rx = state.ws_registry.register(&agent_id);
+                    }
+                    Err(_) => break, // channel closed
                 }
             }
-            // Incoming messages from the client (heartbeats, acknowledgements)
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(hb) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if hb.get("type").and_then(|v| v.as_str()) == Some("heartbeat") {
-                                if let Some(data) = hb.get("data") {
-                                    if let Ok(status) = serde_json::from_value::<crate::status::AgentStatusSnapshot>(data.clone()) {
-                                        if let Ok(engine) = state.engine.lock() {
+                            match hb.get("type").and_then(|v| v.as_str()) {
+                                Some("heartbeat") => {
+                                    if let Some(data) = hb.get("data") {
+                                        if let Ok(status) = serde_json::from_value::<crate::status::AgentStatusSnapshot>(data.clone()) {
+                                            let engine = state.engine.lock().unwrap();
                                             let _ = state.agent_registry.heartbeat(engine.graph(), &agent_id, status);
+                                            drop(engine);
                                         }
                                     }
+                                    continue;
                                 }
-                                continue;
+                                Some("ping") => {
+                                    let _ = socket.send(Message::Text(
+                                        serde_json::json!({"type": "pong"}).to_string().into()
+                                    )).await;
+                                    continue;
+                                }
+                                _ => {}
                             }
                         }
                     }
