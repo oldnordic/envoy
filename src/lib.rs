@@ -5,11 +5,13 @@
 //! agent identity management, and subagent handoff protocol.
 
 pub mod agent;
+pub mod dependency;
 pub mod engine;
 pub mod error;
 pub mod http;
 pub mod message;
 pub mod server;
+pub mod status;
 pub mod types;
 
 // Core types

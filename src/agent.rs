@@ -15,6 +15,8 @@ pub struct AgentInfo {
     pub kind: String,
     pub parent_id: Option<String>,
     pub online: bool,
+    pub status: Option<crate::status::AgentStatusSnapshot>,
+    pub last_heartbeat_at: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -51,6 +53,15 @@ impl AgentRegistry {
         }
 
         for entity in &entities {
+            let status = entity
+                .data
+                .get("status")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            let last_heartbeat_at = entity
+                .data
+                .get("last_heartbeat_at")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let info = AgentInfo {
                 agent_id: entity.name.clone(),
                 name: read_json_str(&entity.data, "name"),
@@ -61,6 +72,8 @@ impl AgentRegistry {
                     .and_then(|v| v.as_str())
                     .map(String::from),
                 online: false,
+                status,
+                last_heartbeat_at,
             };
 
             if let Some(ref pid) = info.parent_id {
@@ -150,6 +163,8 @@ impl AgentRegistry {
                 kind: kind.to_string(),
                 parent_id: parent_id.clone(),
                 online: true,
+                status: None,
+                last_heartbeat_at: None,
             };
 
             tree.agents.insert(agent_id.clone(), info.clone());
@@ -242,6 +257,54 @@ impl AgentRegistry {
         let tree = self.tree.lock().unwrap();
         tree.agents.get(agent_id).map(|a| a.online).unwrap_or(false)
     }
+
+    /// Record a heartbeat, updating the agent's status snapshot and timestamp.
+    pub fn heartbeat(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        agent_id: &str,
+        status: crate::status::AgentStatusSnapshot,
+    ) -> Result<()> {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let mut tree = self.tree.lock().unwrap();
+        let info = tree
+            .agents
+            .get_mut(agent_id)
+            .ok_or_else(|| EnvoyError::AgentNotFound(agent_id.to_string()))?;
+
+        info.status = Some(status);
+        info.last_heartbeat_at = Some(timestamp.clone());
+
+        // Write through to DB
+        if let Some(mut entity) = graph.find_entity_by_kind_and_name(KIND_AGENT, agent_id)? {
+            entity.data["status"] = serde_json::to_value(&info.status)?;
+            entity.data["last_heartbeat_at"] = serde_json::json!(&info.last_heartbeat_at);
+            graph.update_entity(&entity)?;
+        }
+        Ok(())
+    }
+
+    /// Return agents whose last heartbeat is older than threshold_minutes.
+    pub fn get_stale_agents(&self, threshold_minutes: i64) -> Vec<AgentInfo> {
+        let tree = self.tree.lock().unwrap();
+        let now = chrono::Utc::now();
+        tree.agents
+            .values()
+            .filter(|info| {
+                if !info.online {
+                    return false;
+                }
+                if let Some(ref ts) = info.last_heartbeat_at {
+                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                        let age = now - dt.with_timezone(&chrono::Utc);
+                        return age.num_minutes() >= threshold_minutes;
+                    }
+                }
+                true // no heartbeat ever = stale
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 fn agent_to_json(info: &AgentInfo) -> serde_json::Value {
@@ -250,6 +313,8 @@ fn agent_to_json(info: &AgentInfo) -> serde_json::Value {
         "kind": info.kind,
         "parent_id": info.parent_id,
         "online": info.online,
+        "status": info.status,
+        "last_heartbeat_at": info.last_heartbeat_at,
     })
 }
 
@@ -403,5 +468,55 @@ mod tests {
             let a4 = reg.register(g, "a4", "test", None).unwrap();
             assert_eq!(a4.agent_id, "id4");
         }
+    }
+
+    #[test]
+    fn heartbeat_updates_status() {
+        let engine = Engine::open_in_memory().unwrap();
+        let graph = engine.graph();
+        let registry = AgentRegistry::new(graph).unwrap();
+
+        let info = registry
+            .register(graph, "test1".into(), "worker".into(), None)
+            .unwrap();
+        let status = crate::status::AgentStatusSnapshot {
+            state: crate::status::AgentState::Working,
+            task_id: Some("task-1".into()),
+            blocked_reason: None,
+            waiting_on_agent: None,
+            checkpoint: Some("implementation".into()),
+            working_on: "building heartbeat".into(),
+        };
+        registry
+            .heartbeat(graph, &info.agent_id, status.clone())
+            .unwrap();
+
+        let updated = registry.get(&info.agent_id).unwrap();
+        assert!(updated.last_heartbeat_at.is_some());
+        assert_eq!(updated.status.as_ref().unwrap().state.as_str(), "working");
+    }
+
+    #[test]
+    fn get_stale_agents_finds_stale() {
+        let engine = Engine::open_in_memory().unwrap();
+        let graph = engine.graph();
+        let registry = AgentRegistry::new(graph).unwrap();
+
+        let info = registry
+            .register(graph, "stale1".into(), "worker".into(), None)
+            .unwrap();
+        // Never sends heartbeat — should be stale
+        let stale = registry.get_stale_agents(0); // threshold=0 means immediately stale
+        assert!(stale.iter().any(|a| a.agent_id == info.agent_id));
+    }
+
+    #[test]
+    fn get_stale_agents_excludes_offline() {
+        let engine = Engine::open_in_memory().unwrap();
+        let graph = engine.graph();
+        let registry = AgentRegistry::new(graph).unwrap();
+        // Agent loaded from DB is offline
+        let stale = registry.get_stale_agents(0);
+        assert!(stale.is_empty());
     }
 }

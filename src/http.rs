@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
+use crate::dependency::DependencyStore;
 use crate::engine::Engine;
 use crate::error::{EnvoyError, Result};
 use crate::message::{MessageEnvelope, MessageStore, MessageType, Part};
+use crate::status::NudgeConfig;
 
 /// Registry of active WebSocket senders, keyed by agent_id.
 struct WsRegistry {
@@ -58,9 +60,11 @@ impl WsRegistry {
 /// Shared application state across all handlers.
 pub struct AppState {
     pub agent_registry: AgentRegistry,
+    pub dependency_store: DependencyStore,
     pub message_store: MessageStore,
     engine: Arc<Mutex<Engine>>,
     ws_registry: WsRegistry,
+    pub nudge_config: Mutex<NudgeConfig>,
     pub start_time: chrono::DateTime<chrono::Utc>,
 }
 
@@ -69,9 +73,11 @@ impl AppState {
         let agent_registry = AgentRegistry::new(engine.graph())?;
         Ok(Self {
             agent_registry,
+            dependency_store: DependencyStore::new(),
             message_store: MessageStore::new(),
             engine: Arc::new(Mutex::new(engine)),
             ws_registry: WsRegistry::new(),
+            nudge_config: Mutex::new(NudgeConfig::default()),
             start_time: chrono::Utc::now(),
         })
     }
@@ -83,6 +89,59 @@ impl AppState {
     {
         let engine = self.engine.lock().unwrap();
         f(engine.graph())
+    }
+}
+
+/// Background task that checks for stale agents and pushes nudge events.
+pub async fn run_nudge_loop(state: Arc<AppState>) {
+    loop {
+        let interval = {
+            let cfg = state.nudge_config.lock().unwrap();
+            cfg.check_interval_seconds
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+
+        let threshold = state.nudge_config.lock().unwrap().stale_threshold_minutes;
+        let stale = state.agent_registry.get_stale_agents(threshold);
+
+        for agent in &stale {
+            let nudge_data = serde_json::json!({
+                "reason": format!(
+                    "No heartbeat for {} minutes. Current status: {:?}",
+                    threshold,
+                    agent.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown")
+                ),
+                "severity": "warning",
+                "agent_id": agent.agent_id,
+                "last_heartbeat": agent.last_heartbeat_at,
+            });
+            state
+                .ws_registry
+                .send_json(&agent.agent_id, "nudge", &nudge_data);
+
+            // Also notify blocked dependents
+            if let Ok(engine) = state.engine.lock() {
+                let deps = state
+                    .dependency_store
+                    .find_by_blocker(engine.graph(), &agent.agent_id)
+                    .unwrap_or_default();
+                for dep in &deps {
+                    let unblock_msg = serde_json::json!({
+                        "blocker_agent": agent.agent_id,
+                        "blocker_status": agent.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown"),
+                        "message": format!(
+                            "Your blocker ({}) may be stalled — no heartbeat for {}m",
+                            agent.agent_id, threshold
+                        ),
+                    });
+                    state.ws_registry.send_json(
+                        &dep.dependent_agent,
+                        "blocker_stale",
+                        &unblock_msg,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -104,6 +163,22 @@ pub fn build_router(state: SharedState) -> Router {
         // Health
         .route("/health", get(health))
         .route("/stats", get(stats))
+        // Heartbeat + Nudge
+        .route("/heartbeat", axum::routing::post(heartbeat))
+        .route("/dependencies", axum::routing::post(create_dependency))
+        .route("/dependencies/blocker/{agent_id}", get(get_blocker_deps))
+        .route(
+            "/dependencies/dependent/{agent_id}",
+            get(get_dependent_deps),
+        )
+        .route(
+            "/dependencies/{dep_id}/resolve",
+            axum::routing::post(resolve_dependency),
+        )
+        .route(
+            "/nudge-config",
+            get(get_nudge_config).post(update_nudge_config),
+        )
         // WebSocket
         .route("/ws/{agent_id}", get(ws_handler))
         .with_state(state)
@@ -162,6 +237,13 @@ pub struct HealthResponse {
 pub struct StatsResponse {
     pub messages_total: i64,
     pub agents_registered: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDependencyRequest {
+    dependent_agent: String,
+    blocker_agent: String,
+    reason: String,
 }
 
 // ── Handlers ──
@@ -308,6 +390,113 @@ async fn stats(State(state): State<SharedState>) -> Result<impl IntoResponse> {
     }))
 }
 
+async fn heartbeat(
+    State(state): State<SharedState>,
+    Json(req): Json<crate::status::HeartbeatRequest>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    state
+        .agent_registry
+        .heartbeat(engine.graph(), &req.agent_id, req.status)?;
+
+    let deps = state
+        .dependency_store
+        .find_by_blocker(engine.graph(), &req.agent_id)?;
+    let mut nudges = Vec::new();
+    for dep in &deps {
+        nudges.push(crate::status::NudgeMessage {
+            reason: format!("Dependent {} may now be unblocked", dep.dependent_agent),
+            severity: crate::status::NudgeSeverity::Info,
+        });
+        let notify = serde_json::json!({
+            "blocker_agent": req.agent_id,
+            "message": "Your blocker just sent a heartbeat — check if you can proceed",
+        });
+        state
+            .ws_registry
+            .send_json(&dep.dependent_agent, "blocker_updated", &notify);
+    }
+    drop(engine);
+
+    Ok(Json(crate::status::HeartbeatResponse {
+        accepted: true,
+        nudges,
+    }))
+}
+
+async fn create_dependency(
+    State(state): State<SharedState>,
+    Json(req): Json<CreateDependencyRequest>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let dep = state.dependency_store.create(
+        engine.graph(),
+        req.dependent_agent,
+        req.blocker_agent,
+        req.reason,
+    )?;
+    Ok((axum::http::StatusCode::CREATED, Json(dep)))
+}
+
+async fn get_blocker_deps(
+    State(state): State<SharedState>,
+    Path(agent_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let deps = state
+        .dependency_store
+        .find_by_blocker(engine.graph(), &agent_id)?;
+    Ok(Json(
+        serde_json::json!({ "dependencies": deps, "count": deps.len() }),
+    ))
+}
+
+async fn get_dependent_deps(
+    State(state): State<SharedState>,
+    Path(agent_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let deps = state
+        .dependency_store
+        .find_by_dependent(engine.graph(), &agent_id)?;
+    Ok(Json(
+        serde_json::json!({ "dependencies": deps, "count": deps.len() }),
+    ))
+}
+
+async fn resolve_dependency(
+    State(state): State<SharedState>,
+    Path(dep_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let engine = state.engine.lock().unwrap();
+    let dep = state.dependency_store.resolve(engine.graph(), &dep_id)?;
+    drop(engine);
+
+    let notify = serde_json::json!({
+        "dependency_id": dep.dependency_id,
+        "message": format!("Dependency on {} is resolved", dep.blocker_agent),
+    });
+    state
+        .ws_registry
+        .send_json(&dep.dependent_agent, "dependency_resolved", &notify);
+
+    Ok(Json(dep))
+}
+
+async fn update_nudge_config(
+    State(state): State<SharedState>,
+    Json(cfg): Json<crate::status::NudgeConfig>,
+) -> Result<impl IntoResponse> {
+    let mut current = state.nudge_config.lock().unwrap();
+    *current = cfg.clone();
+    Ok(Json(cfg))
+}
+
+async fn get_nudge_config(State(state): State<SharedState>) -> Result<impl IntoResponse> {
+    let cfg = state.nudge_config.lock().unwrap().clone();
+    Ok(Json(cfg))
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
@@ -364,7 +553,20 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
             // Incoming messages from the client (heartbeats, acknowledgements)
             msg = socket.recv() => {
                 match msg {
-                    Some(Ok(Message::Text(_))) => { /* client heartbeat, ignore */ }
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(hb) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if hb.get("type").and_then(|v| v.as_str()) == Some("heartbeat") {
+                                if let Some(data) = hb.get("data") {
+                                    if let Ok(status) = serde_json::from_value::<crate::status::AgentStatusSnapshot>(data.clone()) {
+                                        if let Ok(engine) = state.engine.lock() {
+                                            let _ = state.agent_registry.heartbeat(engine.graph(), &agent_id, status);
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
                 }

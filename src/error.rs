@@ -48,6 +48,19 @@ pub enum EnvoyError {
 
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+
+    #[error("agent status stale: {agent_id} (last heartbeat: {last_heartbeat:?}, threshold: {threshold_minutes}m)")]
+    StaleAgent {
+        agent_id: String,
+        last_heartbeat: Option<String>,
+        threshold_minutes: i64,
+    },
+
+    #[error("dependency already exists: {dependent} is already waiting on {blocker}")]
+    DuplicateDependency { dependent: String, blocker: String },
+
+    #[error("dependency not found: {0}")]
+    DependencyNotFound(String),
 }
 
 impl IntoResponse for EnvoyError {
@@ -62,6 +75,9 @@ impl IntoResponse for EnvoyError {
             Self::MessageTooLarge(_) => (StatusCode::BAD_REQUEST, "MESSAGE_TOO_LARGE"),
             Self::TooManyParts(_) => (StatusCode::BAD_REQUEST, "TOO_MANY_PARTS"),
             Self::Serialization(_) => (StatusCode::BAD_REQUEST, "SERIALIZATION_ERROR"),
+            Self::StaleAgent { .. } => (StatusCode::OK, "STALE_AGENT"),
+            Self::DuplicateDependency { .. } => (StatusCode::CONFLICT, "DUPLICATE_DEPENDENCY"),
+            Self::DependencyNotFound(_) => (StatusCode::NOT_FOUND, "DEPENDENCY_NOT_FOUND"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         };
 
