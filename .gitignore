@@ -2,3 +2,9 @@
 .magellan/
 .claude/settings.local.json
 .remember/
+
+# Internal agent-facing files — not user-facing
+AGENTS.md
+CLAUDE.md
+.drafts/
+docs/superpowers/
