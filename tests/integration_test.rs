@@ -705,3 +705,459 @@ async fn full_handoff_workflow() {
     assert_eq!(roundtripped.context_remaining_pct, 28);
     assert_eq!(roundtripped.remaining_work.len(), 1);
 }
+
+#[tokio::test]
+async fn heartbeat_rejects_missing_working_on() {
+    let app = test_app();
+
+    // Register an agent first
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"test-agent","kind":"worker"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Send heartbeat without working_on field
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/heartbeat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"id1","status":{"state":"working"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "heartbeat must reject missing working_on field"
+    );
+}
+
+#[tokio::test]
+async fn heartbeat_brings_agent_online_after_server_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+
+    // Session 1: register agent
+    let engine1 = envoy::Engine::open(&db_path).unwrap();
+    let state1 = Arc::new(envoy::http::AppState::new(engine1).unwrap());
+    let app1 = envoy::http::build_router(state1);
+
+    app1.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"restart-test","kind":"worker"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Verify online after registration
+    let resp = app1
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let agents: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        agents["agents"][0]["online"], true,
+        "fresh registration is online"
+    );
+
+    // Drop engine (simulates server shutdown)
+    drop(app1);
+
+    // Session 2: new engine from same DB (simulates restart)
+    let engine2 = envoy::Engine::open(&db_path).unwrap();
+    let state2 = Arc::new(envoy::http::AppState::new(engine2).unwrap());
+    let app2 = envoy::http::build_router(state2);
+
+    // Verify agent starts offline after reload
+    let resp = app2
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let agents: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        agents["agents"][0]["online"], false,
+        "agent must start offline after server restart"
+    );
+
+    // Send heartbeat
+    let resp = app2
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/heartbeat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"id1","status":{"state":"working","working_on":"reconnected"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify agent is now online
+    let resp = app2
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let agents: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        agents["agents"][0]["online"], true,
+        "heartbeat must bring agent online after restart"
+    );
+}
+
+#[tokio::test]
+async fn message_ack_lifecycle() {
+    let app = test_app();
+
+    // Register two agents
+    for (name, kind) in [("sender", "worker"), ("receiver", "worker")] {
+        let body = format!(r#"{{"name":"{}","kind":"{}"}}"#, name, kind);
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Send a message from id1 to id2
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"type":"direct","from":"id1","to":"id2","parts":[{"text":"ack test"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let msg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let msg_id = msg["message_id"].as_str().unwrap();
+
+    // Poll unacked — message should appear
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/messages?to=id2&since=0&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["messages"].as_array().unwrap().len(),
+        1,
+        "unacked message should appear"
+    );
+
+    // ACK the message
+    let ack_body = r#"{"agent_id":"id2"}"#.to_string();
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/messages/{}/ack", msg_id))
+                .header("content-type", "application/json")
+                .body(Body::from(ack_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let ack_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(ack_resp["acked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("id2")));
+
+    // Poll unacked — message should NOT appear
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/messages?to=id2&since=0&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["messages"].as_array().unwrap().len(),
+        0,
+        "acked message should not appear in unacked poll"
+    );
+
+    // Poll with include=acked — message should appear
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/messages?to=id2&since=0&limit=10&include=acked")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["messages"].as_array().unwrap().len(),
+        1,
+        "acked message should appear with include=acked"
+    );
+}
+
+#[tokio::test]
+async fn deliverable_verify_event_roundtrip() {
+    let engine = Engine::open_in_memory().unwrap();
+    let state = Arc::new(envoy::http::AppState::new(engine).unwrap());
+    let app = envoy::http::build_router(state.clone());
+
+    // Ingest a verify event with all passed
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/events/verify")
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "project": "envoy",
+                        "agent_id": "id6",
+                        "task_type": "feature",
+                        "claimed_files": ["src/lib.rs"],
+                        "passed": 1,
+                        "failed": 0,
+                        "failures": [],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let event: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(event["event_type"], "task_verify");
+    assert_eq!(event["severity"], "info");
+    assert_eq!(event["data"]["passed"], 1);
+
+    // Ingest a verify event with failures
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/events/verify")
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "project": "envoy",
+                        "agent_id": "id6",
+                        "task_type": "bugfix",
+                        "claimed_files": ["tests/missing.rs"],
+                        "passed": 0,
+                        "failed": 1,
+                        "failures": ["tests/missing.rs: MISSING"],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let event: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(event["event_type"], "task_verify");
+    assert_eq!(event["severity"], "warning");
+    assert_eq!(event["data"]["failed"], 1);
+}
+
+#[tokio::test]
+async fn circuit_breaker_lifecycle() {
+    // Register an agent
+    let engine = Engine::open_in_memory().unwrap();
+    let state = Arc::new(envoy::http::AppState::new(engine).unwrap());
+    let app = envoy::http::build_router(state.clone());
+
+    // Register agent
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({"name": "test-agent", "kind": "worker"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let agent: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    let agent_id = agent["agent_id"].as_str().unwrap();
+
+    // Verify circuit breaker starts closed
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/agents/{agent_id}/circuit"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cb: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    assert_eq!(cb["state"], "closed");
+    assert_eq!(cb["failure_count"], 0);
+
+    // Report delivery failures until threshold (default 5)
+    for _ in 0..5 {
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/agents/{agent_id}/circuit/failure"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Circuit should now be open
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/agents/{agent_id}/circuit"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cb: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    assert_eq!(cb["state"], "open");
+
+    // Heartbeat should implicitly close the circuit
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/heartbeat")
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "status": {"state": "working", "working_on": "test"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Circuit should be closed again after heartbeat
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/agents/{agent_id}/circuit"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cb: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    assert_eq!(cb["state"], "closed", "heartbeat should close circuit");
+    assert_eq!(cb["failure_count"], 0, "failure count should reset");
+}

@@ -138,6 +138,20 @@ impl AgentRegistry {
         kind: &str,
         parent_id: Option<String>,
     ) -> Result<AgentInfo> {
+        {
+            // Reclaim existing agent with same name if it exists (handles restart)
+            let existing_id = {
+                let tree = self.tree.lock().unwrap();
+                tree.agents
+                    .values()
+                    .find(|a| a.name == name)
+                    .map(|a| a.agent_id.clone())
+            };
+            if let Some(ref id) = existing_id {
+                return self.reclaim(graph, id);
+            }
+        }
+
         let info;
         let next_id_val;
         {
@@ -218,6 +232,26 @@ impl AgentRegistry {
         Ok(affected)
     }
 
+    fn reclaim(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        agent_id: &str,
+    ) -> Result<AgentInfo> {
+        let info = {
+            let mut tree = self.tree.lock().unwrap();
+            let info = tree
+                .agents
+                .get_mut(agent_id)
+                .ok_or_else(|| EnvoyError::AgentNotFound(agent_id.to_string()))?;
+            info.online = true;
+            info.status = None;
+            info.last_heartbeat_at = None;
+            info.clone()
+        };
+        Self::persist_agent(graph, &info)?;
+        Ok(info)
+    }
+
     pub fn get(&self, agent_id: &str) -> Result<AgentInfo> {
         let tree = self.tree.lock().unwrap();
         tree.agents
@@ -272,6 +306,7 @@ impl AgentRegistry {
             .get_mut(agent_id)
             .ok_or_else(|| EnvoyError::AgentNotFound(agent_id.to_string()))?;
 
+        info.online = true;
         info.status = Some(status);
         info.last_heartbeat_at = Some(timestamp.clone());
 
@@ -408,14 +443,13 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_names_allowed_different_ids() {
+    fn same_name_reclaims_existing_agent() {
         let (reg, engine) = test_registry();
         let g = engine.graph();
         let a1 = reg.register(g, "claude", "claude", None).unwrap();
         let a2 = reg.register(g, "claude", "claude", None).unwrap();
-        assert_ne!(a1.agent_id, a2.agent_id);
-        assert_eq!(a1.name, "claude");
-        assert_eq!(a2.name, "claude");
+        assert_eq!(a1.agent_id, a2.agent_id, "same name should reclaim same agent");
+        assert!(a2.online, "reclaimed agent should be online");
     }
 
     #[test]
@@ -492,6 +526,42 @@ mod tests {
         let updated = registry.get(&info.agent_id).unwrap();
         assert!(updated.last_heartbeat_at.is_some());
         assert_eq!(updated.status.as_ref().unwrap().state.as_str(), "working");
+        assert!(updated.online, "heartbeat must set online=true");
+    }
+
+    #[test]
+    fn heartbeat_brings_agent_online_after_restart() {
+        let engine = Engine::open_in_memory().unwrap();
+        let graph = engine.graph();
+
+        // First session: register an agent
+        let reg = AgentRegistry::new(graph).unwrap();
+        let info = reg.register(graph, "agent1", "worker", None).unwrap();
+        assert!(info.online, "fresh registration is online");
+        drop(reg);
+
+        // Second session: reload — agent starts offline
+        let reg2 = AgentRegistry::new(graph).unwrap();
+        let reloaded = reg2.get(&info.agent_id).unwrap();
+        assert!(!reloaded.online, "agents start offline after reload");
+
+        // Heartbeat brings agent back online
+        let status = crate::status::AgentStatusSnapshot {
+            state: crate::status::AgentState::Working,
+            task_id: None,
+            blocked_reason: None,
+            waiting_on_agent: None,
+            checkpoint: None,
+            working_on: "reconnected".into(),
+        };
+        reg2.heartbeat(graph, &info.agent_id, status).unwrap();
+
+        let after_hb = reg2.get(&info.agent_id).unwrap();
+        assert!(
+            after_hb.online,
+            "heartbeat must bring agent online after restart"
+        );
+        assert!(after_hb.last_heartbeat_at.is_some());
     }
 
     #[test]

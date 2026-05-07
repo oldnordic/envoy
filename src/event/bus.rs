@@ -111,6 +111,7 @@ impl EventBus {
         Self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn ingest(
         &self,
         graph: &sqlitegraph::SqliteGraph,

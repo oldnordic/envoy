@@ -19,6 +19,7 @@ impl MessageStore {
     }
 
     /// Store a message and return a fully-built MessageEnvelope.
+    #[allow(clippy::too_many_arguments)]
     pub fn store(
         &self,
         graph: &sqlitegraph::SqliteGraph,
@@ -104,13 +105,47 @@ impl MessageStore {
         })
     }
 
+    /// Mark a message as consumed (ACKed) by an agent.
+    pub fn ack(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        message_id: &str,
+        agent_id: &str,
+    ) -> Result<Vec<String>> {
+        let id: i64 = message_id
+            .parse()
+            .map_err(|_| EnvoyError::MessageNotFound(message_id.to_string()))?;
+        let mut entity = graph
+            .get_entity(id)
+            .map_err(|_| EnvoyError::MessageNotFound(message_id.to_string()))?;
+        if entity.kind != KIND_MESSAGE {
+            return Err(EnvoyError::MessageNotFound(message_id.to_string()));
+        }
+
+        let mut acked: Vec<String> = entity
+            .data
+            .get("acked_by")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        if !acked.iter().any(|a| a == agent_id) {
+            acked.push(agent_id.to_string());
+        }
+
+        entity.data["acked_by"] = serde_json::to_value(&acked)?;
+        graph.update_entity(&entity)?;
+        Ok(acked)
+    }
+
     /// Get messages for a recipient since a given sequence_id.
+    /// When `include_acked` is false, only returns messages not yet ACKed by the recipient.
     pub fn poll(
         &self,
         graph: &sqlitegraph::SqliteGraph,
         to: &str,
         since: i64,
         limit: i64,
+        include_acked: bool,
     ) -> Result<Vec<MessageEnvelope>> {
         let limit = limit.min(100);
         let entities = graph.find_entities_by_kind(KIND_MESSAGE)?;
@@ -123,7 +158,19 @@ impl MessageStore {
                     .get("sequence_id")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
-                msg_to == to && seq > since
+                if msg_to != to || seq <= since {
+                    return false;
+                }
+                if include_acked {
+                    return true;
+                }
+                // Filter: only include if recipient hasn't ACKed
+                let acked_by: Vec<String> = e
+                    .data
+                    .get("acked_by")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                !acked_by.iter().any(|a| a == to)
             })
             .map(entity_to_envelope)
             .filter_map(|r| r.ok())
@@ -244,10 +291,10 @@ mod tests {
             .unwrap();
         assert_eq!(stored2.sequence_id, 2);
 
-        let msgs = store.poll(graph, "id2", 0, 50).unwrap();
+        let msgs = store.poll(graph, "id2", 0, 50, true).unwrap();
         assert_eq!(msgs.len(), 2);
 
-        let msgs = store.poll(graph, "id2", 1, 50).unwrap();
+        let msgs = store.poll(graph, "id2", 1, 50, true).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].sequence_id, 2);
     }

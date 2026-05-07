@@ -3,11 +3,12 @@
 # Source: /home/feanor/Projects/.claude/scripts/quality-gate.sh
 # Used by: BOTH Hermes and Claude Code
 #
-# Usage: quality-gate.sh [--project NAME] [--log] [--json] [--full]
+# Usage: quality-gate.sh [--project NAME] [--log] [--json] [--full] [--deliverables [CONFIG]]
 #   --project NAME  Override project name (default: basename of CWD)
 #   --log           Log results to ~/.grounded/session-log.jsonl
 #   --json          Output results as JSON
 #   --full          Scan ALL src/ files (not just diff) for file-level checks
+#   --deliverables  Verify deliverables from .envoy/deliverables.json (or given path)
 #
 # Checks (in order):
 #   1. cargo fmt --check     (BLOCK)
@@ -18,6 +19,7 @@
 #   6. dead_code scan        (BLOCK) — #[allow(dead_code)] + #![allow(dead_code)]
 #   7. allow-without-reason  (WARN)  — #[allow(...)] without reason=
 #   8. bad comments scan     (BLOCK) — FIXME/HACK/XXX/TEMPORARY
+#   9. deliverable verify    (WARN)  — file existence + size checks from config
 #
 # Exit codes: 0=clean, 1=blocked, 2=warnings only
 
@@ -28,6 +30,8 @@ PROJECT=""
 DO_LOG=false
 DO_JSON=false
 DO_FULL=false
+DO_DELIVERABLES=false
+DELIVERABLES_CONFIG=""
 SKIP_COUNT=0
 
 while [[ $# -gt 0 ]]; do
@@ -36,6 +40,13 @@ while [[ $# -gt 0 ]]; do
         --log)     DO_LOG=true; shift ;;
         --json)    DO_JSON=true; shift ;;
         --full)    DO_FULL=true; shift ;;
+        --deliverables)
+            DO_DELIVERABLES=true
+            shift
+            if [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
+                DELIVERABLES_CONFIG="$1"; shift
+            fi
+            ;;
         *)         shift ;;
     esac
 done
@@ -340,6 +351,60 @@ if has_files; then
 else
     echo "SKIPPED (no files to scan)"
     add_skip "bad comments scan -- no files in scope"
+fi
+
+# ── 9. Deliverable verification ──
+DELIV_TOTAL=0
+DELIV_PASS=0
+DELIV_FAIL=0
+
+if [ "$DO_DELIVERABLES" = true ]; then
+    DELIV_CONFIG="${DELIVERABLES_CONFIG:-.envoy/deliverables.json}"
+    echo -n "  [9/9] deliverable verify ($DELIV_CONFIG)... "
+
+    if [ ! -f "$DELIV_CONFIG" ]; then
+        echo "SKIP (config not found)"
+        add_skip "deliverable verify -- $DELIV_CONFIG not found"
+    elif ! command -v jq &>/dev/null; then
+        echo "SKIP (jq required)"
+        add_skip "deliverable verify -- jq not installed"
+    else
+        while IFS= read -r task_type; do
+            [ -z "$task_type" ] && continue
+            mapfile -t REQUIRED_FILES < <(jq -r ".$task_type.files[]?" "$DELIV_CONFIG" 2>/dev/null || true)
+            MIN_SIZE=$(jq -r ".$task_type.min_size // 0" "$DELIV_CONFIG" 2>/dev/null || echo "0")
+
+            for pattern in "${REQUIRED_FILES[@]:-}"; do
+                [ -z "$pattern" ] && continue
+                for filepath in $pattern; do
+                    DELIV_TOTAL=$((DELIV_TOTAL + 1))
+                    if [ ! -f "$filepath" ]; then
+                        echo ""
+                        echo "    MISSING: $filepath (task: $task_type)"
+                        DELIV_FAIL=$((DELIV_FAIL + 1))
+                    elif [ "$MIN_SIZE" -gt 0 ] && [ "$(wc -c < "$filepath")" -lt "$MIN_SIZE" ]; then
+                        echo ""
+                        echo "    TOO SMALL: $filepath ($(wc -c < "$filepath")b < ${MIN_SIZE}b)"
+                        DELIV_FAIL=$((DELIV_FAIL + 1))
+                    else
+                        DELIV_PASS=$((DELIV_PASS + 1))
+                    fi
+                done
+            done
+        done < <(jq -r 'keys[]' "$DELIV_CONFIG" 2>/dev/null || true)
+
+        if [ $DELIV_TOTAL -eq 0 ]; then
+            echo "SKIP (empty config)"
+            add_skip "deliverable verify -- no tasks defined"
+        elif [ $DELIV_FAIL -gt 0 ]; then
+            echo "WARN ($DELIV_PASS/$DELIV_TOTAL passed, $DELIV_FAIL missing)"
+            add_warn "deliverable verify: $DELIV_FAIL/$DELIV_TOTAL failed (advisory mode)"
+        else
+            echo "PASS ($DELIV_TOTAL/$DELIV_TOTAL)"
+        fi
+    fi
+else
+    echo "  [9/9] deliverable verify... SKIPPED (use --deliverables to enable)"
 fi
 
 # ── Summary ──

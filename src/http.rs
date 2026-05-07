@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
+use crate::circuit;
 use crate::dependency::DependencyStore;
 use crate::engine::Engine;
 use crate::error::{EnvoyError, Result};
@@ -77,6 +78,7 @@ pub struct AppState {
     pub task_store: TaskStore,
     pub subscription_store: SubscriptionStore,
     pub project_config_store: ProjectConfigStore,
+    pub circuit_breaker: circuit::CircuitBreaker,
     pub(crate) engine: Arc<Mutex<Engine>>,
     pub(crate) ws_registry: WsRegistry,
     pub nudge_config: Mutex<NudgeConfig>,
@@ -95,6 +97,7 @@ impl AppState {
             task_store: TaskStore::new(),
             subscription_store: SubscriptionStore::new(),
             project_config_store: ProjectConfigStore::new(),
+            circuit_breaker: circuit::CircuitBreaker::with_defaults(),
             engine: Arc::new(Mutex::new(engine)),
             ws_registry: WsRegistry::new(),
             nudge_config: Mutex::new(NudgeConfig::default()),
@@ -198,6 +201,16 @@ pub fn build_router(state: SharedState) -> Router {
         // Messages
         .route("/messages", get(poll_messages).post(send_message))
         .route("/messages/{message_id}", get(get_message))
+        .route(
+            "/messages/{message_id}/ack",
+            axum::routing::post(ack_message),
+        )
+        // Circuit Breaker
+        .route("/agents/{agent_id}/circuit", get(get_circuit))
+        .route(
+            "/agents/{agent_id}/circuit/failure",
+            axum::routing::post(record_circuit_failure),
+        )
         // Health
         .route("/health", get(health))
         .route("/stats", get(stats))
@@ -222,6 +235,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/events/gate", axum::routing::post(ingest_gate_event))
         .route("/events/ci", axum::routing::post(ingest_ci_event))
         .route("/events/doc", axum::routing::post(ingest_doc_event))
+        .route("/events/verify", axum::routing::post(ingest_verify_event))
         .route("/events", get(query_events))
         // Task Board
         .route("/tasks/propose", axum::routing::post(propose_task))
@@ -277,6 +291,8 @@ pub struct PollQuery {
     pub since: Option<i64>,
     #[serde(default = "default_limit")]
     pub limit: i64,
+    #[serde(default)]
+    pub include: Option<String>,
 }
 
 fn default_limit() -> i64 {
@@ -363,7 +379,7 @@ async fn pending_messages(
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
     // Tombstone: return undelivered messages for a disconnected agent
-    let messages = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100))?;
+    let messages = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100, true))?;
     Ok(Json(serde_json::json!({
         "messages": messages,
         "count": messages.len()
@@ -398,9 +414,21 @@ async fn send_message(
 
     // Push to recipient via WebSocket if connected
     let event_data = serde_json::to_value(&stored).unwrap_or_default();
-    state
-        .ws_registry
-        .send_json(&recipient, "message", &event_data);
+    match state.circuit_breaker.check(&recipient) {
+        circuit::CanDeliver::Yes | circuit::CanDeliver::Probe => {
+            let delivered = state
+                .ws_registry
+                .send_json(&recipient, "message", &event_data);
+            if delivered {
+                state.circuit_breaker.record_success(&recipient);
+            } else {
+                state.circuit_breaker.record_failure(&recipient);
+            }
+        }
+        circuit::CanDeliver::No => {
+            // Circuit is open — message stored but not pushed. Agent will catch up on reconnect.
+        }
+    }
 
     Ok((axum::http::StatusCode::CREATED, Json(stored)))
 }
@@ -423,13 +451,39 @@ async fn poll_messages(
     let since = query.since.unwrap_or(0);
     let limit = query.limit.min(100);
 
-    let messages = state.with_graph(|g| state.message_store.poll(g, &query.to, since, limit))?;
+    let include_acked = query.include.as_deref() == Some("acked");
+    let messages = state.with_graph(|g| {
+        state
+            .message_store
+            .poll(g, &query.to, since, limit, include_acked)
+    })?;
     let latest_seq = messages.last().map(|m| m.sequence_id).unwrap_or(since);
 
     Ok(Json(PollResponse {
         messages,
         latest_sequence: latest_seq,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AckRequest {
+    pub agent_id: String,
+}
+
+async fn ack_message(
+    State(state): State<SharedState>,
+    Path(message_id): Path<String>,
+    Json(req): Json<AckRequest>,
+) -> Result<impl IntoResponse> {
+    // Verify agent exists
+    let _ = state.agent_registry.get(&req.agent_id)?;
+
+    let acked = state.with_graph(|g| state.message_store.ack(g, &message_id, &req.agent_id))?;
+
+    Ok(Json(serde_json::json!({
+        "message_id": message_id,
+        "acked_by": acked,
+    })))
 }
 
 async fn health(State(state): State<SharedState>) -> impl IntoResponse {
@@ -462,6 +516,9 @@ async fn heartbeat(
         .agent_registry
         .heartbeat(engine.graph(), &req.agent_id, req.status)?;
 
+    // Heartbeat resets circuit breaker (agent is alive)
+    state.circuit_breaker.reset(&req.agent_id);
+
     let deps = state
         .dependency_store
         .find_by_blocker(engine.graph(), &req.agent_id)?;
@@ -485,6 +542,34 @@ async fn heartbeat(
         accepted: true,
         nudges,
     }))
+}
+
+async fn get_circuit(
+    State(state): State<SharedState>,
+    Path(agent_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let _ = state.agent_registry.get(&agent_id)?;
+    let status = state.circuit_breaker.get_state(&agent_id);
+    Ok(Json(serde_json::json!({
+        "agent_id": status.agent_id,
+        "state": status.state,
+        "failure_count": status.failures,
+        "opened_at": status.opened_at,
+    })))
+}
+
+async fn record_circuit_failure(
+    State(state): State<SharedState>,
+    Path(agent_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let _ = state.agent_registry.get(&agent_id)?;
+    state.circuit_breaker.record_failure(&agent_id);
+    let status = state.circuit_breaker.get_state(&agent_id);
+    Ok(Json(serde_json::json!({
+        "agent_id": status.agent_id,
+        "state": status.state,
+        "failure_count": status.failures,
+    })))
 }
 
 async fn create_dependency(
@@ -584,7 +669,7 @@ async fn ingest_hook_event(
         serde_json::json!({
             "hook_name": req.hook_name,
             "exit_code": req.exit_code,
-            "output_preview": &req.output[..req.output.len().min(200)],
+            "output_preview": req.output.chars().take(200).collect::<String>(),
         }),
     )?;
     drop(engine);
@@ -696,6 +781,47 @@ async fn ingest_doc_event(
         &state,
         &req.project,
         "doc_event",
+        &serde_json::to_value(&event).unwrap_or_default(),
+    );
+    Ok((axum::http::StatusCode::CREATED, Json(event)))
+}
+
+async fn ingest_verify_event(
+    State(state): State<SharedState>,
+    Json(req): Json<event::VerifyEventRequest>,
+) -> Result<impl IntoResponse> {
+    let severity = if req.failed > 0 {
+        EventSeverity::Warning
+    } else {
+        EventSeverity::Info
+    };
+    let engine = state.engine.lock().unwrap();
+    let event = state.event_bus.ingest(
+        engine.graph(),
+        req.project.clone(),
+        EventType::TaskVerify,
+        severity,
+        format!("verify:{}", req.task_type),
+        format!(
+            "Deliverable verify: {}/{} passed for {}",
+            req.passed,
+            req.passed + req.failed,
+            req.task_type
+        ),
+        serde_json::json!({
+            "agent_id": req.agent_id,
+            "task_type": req.task_type,
+            "claimed_files": req.claimed_files,
+            "passed": req.passed,
+            "failed": req.failed,
+            "failures": req.failures,
+        }),
+    )?;
+    drop(engine);
+    broadcast_to_project(
+        &state,
+        &req.project,
+        "verify_event",
         &serde_json::to_value(&event).unwrap_or_default(),
     );
     Ok((axum::http::StatusCode::CREATED, Json(event)))
@@ -962,7 +1088,7 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
 
     // Catch-up: undelivered messages for this agent
     {
-        let pending = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100));
+        let pending = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100, true));
         if let Ok(pending) = pending {
             for msg in &pending {
                 let event = serde_json::json!({"event": "message", "data": msg});
@@ -1129,15 +1255,22 @@ fn broadcast_to_project(
     // Extract event ID from data for delivery tracking
     let event_id = data.get("id").and_then(|v| v.as_str());
     for agent_id in &subs {
+        // Circuit breaker: skip delivery to agents with open circuits
+        match state.circuit_breaker.check(agent_id) {
+            circuit::CanDeliver::No => continue,
+            circuit::CanDeliver::Yes | circuit::CanDeliver::Probe => {}
+        }
         let delivered = state.ws_registry.send_json(agent_id, event_type, data);
-        // Record delivery so offline agents get precise replay on reconnect
         if delivered {
+            state.circuit_breaker.record_success(agent_id);
             if let Some(eid) = event_id {
                 let engine = state.engine.lock().unwrap();
                 let _ = state
                     .delivery_tracker
                     .record_delivery(engine.graph(), agent_id, eid);
             }
+        } else {
+            state.circuit_breaker.record_failure(agent_id);
         }
     }
 }

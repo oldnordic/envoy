@@ -36,6 +36,7 @@ pub enum EventType {
     TaskHandoff,
     GateBlock,
     GraphRefresh,
+    TaskVerify,
 }
 
 impl EventType {
@@ -48,6 +49,7 @@ impl EventType {
             Self::TaskHandoff => "task_handoff",
             Self::GateBlock => "gate_block",
             Self::GraphRefresh => "graph_refresh",
+            Self::TaskVerify => "task_verify",
         }
     }
 }
@@ -113,4 +115,15 @@ pub struct DocEventRequest {
     pub project: String,
     pub doc_files: Vec<String>,
     pub last_updated_seconds: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyEventRequest {
+    pub project: String,
+    pub agent_id: String,
+    pub task_type: String,
+    pub claimed_files: Vec<String>,
+    pub passed: usize,
+    pub failed: usize,
+    pub failures: Vec<String>,
 }
