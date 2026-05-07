@@ -29,18 +29,32 @@ pub async fn run_doc_monitor(
         let now = chrono::Utc::now().timestamp();
         let age_seconds = now - last_commit_ts;
 
-        let mut last = last_checked.lock().unwrap();
-        if age_seconds > 86400 && *last < now - 86400 {
-            *last = now;
-            if let Ok(engine) = state.engine.lock() {
+        // Check + update under lock, release before async work
+        let should_emit = {
+            let mut last = last_checked.lock().unwrap();
+            if age_seconds > 86400 && *last < now - 86400 {
+                *last = now;
+                true
+            } else {
+                false
+            }
+        };
+        // lock dropped here — safe to .await
+
+        if should_emit {
+            let state_fb = state.clone();
+            let project_fb = project.clone();
+            let project_fb2 = project.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let engine = state_fb.engine.lock().unwrap();
                 let severity = if age_seconds > 604800 {
                     EventSeverity::Warning
                 } else {
                     EventSeverity::Info
                 };
-                if let Ok(event) = state.event_bus.ingest(
+                if let Ok(event) = state_fb.event_bus.ingest(
                     engine.graph(),
-                    project.clone(),
+                    project_fb,
                     EventType::DocSync,
                     severity,
                     "doc:wiki".into(),
@@ -50,17 +64,17 @@ pub async fn run_doc_monitor(
                     }),
                 ) {
                     let event_json = serde_json::to_value(&event).unwrap_or_default();
-                    let subs = state
+                    let subs = state_fb
                         .subscription_store
-                        .subscribers(engine.graph(), &project)
+                        .subscribers(engine.graph(), &project_fb2)
                         .unwrap_or_default();
                     for agent_id in &subs {
                         let delivered =
-                            state
+                            state_fb
                                 .ws_registry
                                 .send_json(agent_id, "doc_event", &event_json);
                         if delivered {
-                            let _ = state.delivery_tracker.record_delivery(
+                            let _ = state_fb.delivery_tracker.record_delivery(
                                 engine.graph(),
                                 agent_id,
                                 &event.id,
@@ -68,7 +82,8 @@ pub async fn run_doc_monitor(
                         }
                     }
                 }
-            }
+            })
+            .await;
         }
     }
 }

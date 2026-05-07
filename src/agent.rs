@@ -232,11 +232,7 @@ impl AgentRegistry {
         Ok(affected)
     }
 
-    fn reclaim(
-        &self,
-        graph: &sqlitegraph::SqliteGraph,
-        agent_id: &str,
-    ) -> Result<AgentInfo> {
+    fn reclaim(&self, graph: &sqlitegraph::SqliteGraph, agent_id: &str) -> Result<AgentInfo> {
         let info = {
             let mut tree = self.tree.lock().unwrap();
             let info = tree
@@ -448,7 +444,10 @@ mod tests {
         let g = engine.graph();
         let a1 = reg.register(g, "claude", "claude", None).unwrap();
         let a2 = reg.register(g, "claude", "claude", None).unwrap();
-        assert_eq!(a1.agent_id, a2.agent_id, "same name should reclaim same agent");
+        assert_eq!(
+            a1.agent_id, a2.agent_id,
+            "same name should reclaim same agent"
+        );
         assert!(a2.online, "reclaimed agent should be online");
     }
 

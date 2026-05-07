@@ -105,13 +105,36 @@ impl AppState {
         })
     }
 
-    /// Lock the engine and run a closure with access to the shared SqliteGraph.
-    pub fn with_graph<F, T>(&self, f: F) -> T
+    /// Async version of with_graph — offloads DB work to the blocking thread pool.
+    /// Use this from all async handlers to avoid blocking tokio worker threads.
+    pub async fn with_graph_async<F, T>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&sqlitegraph::SqliteGraph) -> T,
+        F: FnOnce(&sqlitegraph::SqliteGraph) -> T + Send + 'static,
+        T: Send + 'static,
     {
-        let engine = self.engine.lock().unwrap();
-        f(engine.graph())
+        let engine = self.engine.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let engine = engine.lock().unwrap();
+            f(engine.graph())
+        })
+        .await
+        .map_err(|_| EnvoyError::InvalidEntity("blocking task panicked".into()))?;
+        Ok(result)
+    }
+
+    /// Async version that provides the full Engine (not just graph).
+    pub async fn with_engine_async<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Engine) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let engine = self.engine.clone();
+        tokio::task::spawn_blocking(move || {
+            let engine = engine.lock().unwrap();
+            f(&engine)
+        })
+        .await
+        .map_err(|_| EnvoyError::InvalidEntity("blocking task panicked".into()))?
     }
 }
 
@@ -142,45 +165,46 @@ pub async fn run_nudge_loop(state: Arc<AppState>) {
                 .ws_registry
                 .send_json(&agent.agent_id, "nudge", &nudge_data);
 
-            // Also notify blocked dependents
-            if let Ok(engine) = state.engine.lock() {
-                let deps = state
+            // Fetch blocked dependents + reclaim stale tasks via blocking pool
+            let state_fb = state.clone();
+            let agent_id_fb = agent.agent_id.clone();
+            let (deps, reclaimed) = tokio::task::spawn_blocking(move || {
+                let engine = state_fb.engine.lock().unwrap();
+                let deps = state_fb
                     .dependency_store
-                    .find_by_blocker(engine.graph(), &agent.agent_id)
+                    .find_by_blocker(engine.graph(), &agent_id_fb)
                     .unwrap_or_default();
-                for dep in &deps {
-                    let unblock_msg = serde_json::json!({
-                        "blocker_agent": agent.agent_id,
-                        "blocker_status": agent.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown"),
-                        "message": format!(
-                            "Your blocker ({}) may be stalled — no heartbeat for {}m",
-                            agent.agent_id, threshold
-                        ),
-                    });
-                    state.ws_registry.send_json(
-                        &dep.dependent_agent,
-                        "blocker_stale",
-                        &unblock_msg,
-                    );
-                }
-
-                // Reclaim tasks claimed by stale agents
-                if let Ok(reclaimed) = state
+                let reclaimed = state_fb
                     .task_store
-                    .reclaim_stale(engine.graph(), &agent.agent_id)
-                {
-                    for task_id in &reclaimed {
-                        let reclaim_msg = serde_json::json!({
-                            "task_id": task_id,
-                            "message": format!("Task reclaimed — {} is stale", agent.agent_id),
-                        });
-                        state.ws_registry.send_json(
-                            &agent.agent_id,
-                            "task_reclaimed",
-                            &reclaim_msg,
-                        );
-                    }
-                }
+                    .reclaim_stale(engine.graph(), &agent_id_fb)
+                    .unwrap_or_default();
+                (deps, reclaimed)
+            })
+            .await
+            .unwrap_or((Vec::new(), Vec::new()));
+
+            // WS sends are in-memory
+            for dep in &deps {
+                let unblock_msg = serde_json::json!({
+                    "blocker_agent": agent.agent_id,
+                    "blocker_status": agent.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown"),
+                    "message": format!(
+                        "Your blocker ({}) may be stalled — no heartbeat for {}m",
+                        agent.agent_id, threshold
+                    ),
+                });
+                state
+                    .ws_registry
+                    .send_json(&dep.dependent_agent, "blocker_stale", &unblock_msg);
+            }
+            for task_id in &reclaimed {
+                let reclaim_msg = serde_json::json!({
+                    "task_id": task_id,
+                    "message": format!("Task reclaimed — {} is stale", agent.agent_id),
+                });
+                state
+                    .ws_registry
+                    .send_json(&agent.agent_id, "task_reclaimed", &reclaim_msg);
             }
         }
     }
@@ -331,11 +355,15 @@ async fn register_agent(
     State(state): State<SharedState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse> {
-    let info = state.with_graph(|g| {
-        state
+    let state_fb = state.clone();
+    let info = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
             .agent_registry
-            .register(g, &req.name, &req.kind, req.parent_id)
-    })?;
+            .register(engine.graph(), &req.name, &req.kind, req.parent_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok((axum::http::StatusCode::CREATED, Json(info)))
 }
 
@@ -343,7 +371,15 @@ async fn disconnect_agent(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let affected = state.with_graph(|g| state.agent_registry.disconnect(g, &agent_id))?;
+    let state_fb = state.clone();
+    let affected = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .agent_registry
+            .disconnect(engine.graph(), &agent_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(
         serde_json::json!({"disconnected": true, "affected": affected}),
     ))
@@ -378,8 +414,15 @@ async fn pending_messages(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    // Tombstone: return undelivered messages for a disconnected agent
-    let messages = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100, true))?;
+    let state_fb = state.clone();
+    let messages = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .message_store
+            .poll(engine.graph(), &agent_id, 0, 100, true)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(serde_json::json!({
         "messages": messages,
         "count": messages.len()
@@ -390,19 +433,21 @@ async fn send_message(
     State(state): State<SharedState>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse> {
-    // Verify sender exists and is online
+    // Verify sender exists and is online (in-memory)
     let sender = state.agent_registry.get(&req.from)?;
     if !sender.online {
         return Err(EnvoyError::AgentOffline(req.from));
     }
 
-    // Verify recipient exists
+    // Verify recipient exists (in-memory)
     let _recipient = state.agent_registry.get(&req.to)?;
     let recipient = req.to.clone();
 
-    let stored = state.with_graph(|g| {
-        state.message_store.store(
-            g,
+    let state_fb = state.clone();
+    let stored = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.message_store.store(
+            engine.graph(),
             req.msg_type,
             req.from.clone(),
             req.to.clone(),
@@ -410,9 +455,11 @@ async fn send_message(
             req.context_id.clone(),
             req.parts,
         )
-    })?;
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
 
-    // Push to recipient via WebSocket if connected
+    // Push to recipient via WebSocket if connected (in-memory)
     let event_data = serde_json::to_value(&stored).unwrap_or_default();
     match state.circuit_breaker.check(&recipient) {
         circuit::CanDeliver::Yes | circuit::CanDeliver::Probe => {
@@ -437,7 +484,13 @@ async fn get_message(
     State(state): State<SharedState>,
     Path(message_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let msg = state.with_graph(|g| state.message_store.get(g, &message_id))?;
+    let state_fb = state.clone();
+    let msg = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.message_store.get(engine.graph(), &message_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(msg))
 }
 
@@ -445,18 +498,23 @@ async fn poll_messages(
     State(state): State<SharedState>,
     Query(query): Query<PollQuery>,
 ) -> Result<impl IntoResponse> {
-    // Verify recipient exists
+    // Verify recipient exists (in-memory)
     let _ = state.agent_registry.get(&query.to)?;
 
     let since = query.since.unwrap_or(0);
     let limit = query.limit.min(100);
-
     let include_acked = query.include.as_deref() == Some("acked");
-    let messages = state.with_graph(|g| {
-        state
+
+    let state_fb = state.clone();
+    let to = query.to.clone();
+    let messages = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
             .message_store
-            .poll(g, &query.to, since, limit, include_acked)
-    })?;
+            .poll(engine.graph(), &to, since, limit, include_acked)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     let latest_seq = messages.last().map(|m| m.sequence_id).unwrap_or(since);
 
     Ok(Json(PollResponse {
@@ -475,10 +533,19 @@ async fn ack_message(
     Path(message_id): Path<String>,
     Json(req): Json<AckRequest>,
 ) -> Result<impl IntoResponse> {
-    // Verify agent exists
+    // Verify agent exists (in-memory)
     let _ = state.agent_registry.get(&req.agent_id)?;
 
-    let acked = state.with_graph(|g| state.message_store.ack(g, &message_id, &req.agent_id))?;
+    let state_fb = state.clone();
+    let mid = message_id.clone();
+    let acked = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .message_store
+            .ack(engine.graph(), &mid, &req.agent_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
 
     Ok(Json(serde_json::json!({
         "message_id": message_id,
@@ -498,7 +565,16 @@ async fn health(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 async fn stats(State(state): State<SharedState>) -> Result<impl IntoResponse> {
-    let total = state.with_graph(|g| state.message_store.count_all(g).unwrap_or(0));
+    let state_fb = state.clone();
+    let total = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .message_store
+            .count_all(engine.graph())
+            .unwrap_or(0)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))?;
     let registered = state.agent_registry.list_all().len();
 
     Ok(Json(StatsResponse {
@@ -511,17 +587,26 @@ async fn heartbeat(
     State(state): State<SharedState>,
     Json(req): Json<crate::status::HeartbeatRequest>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    state
-        .agent_registry
-        .heartbeat(engine.graph(), &req.agent_id, req.status)?;
+    let agent_id = req.agent_id.clone();
+    let status = req.status.clone();
 
-    // Heartbeat resets circuit breaker (agent is alive)
+    // Offload DB work to blocking pool — clone Arc<AppState> for the closure
+    let state_for_blocking = state.clone();
+    let deps = tokio::task::spawn_blocking(move || {
+        let engine = state_for_blocking.engine.lock().unwrap();
+        state_for_blocking
+            .agent_registry
+            .heartbeat(engine.graph(), &agent_id, status)?;
+        state_for_blocking
+            .dependency_store
+            .find_by_blocker(engine.graph(), &agent_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("heartbeat blocking task panicked".into()))??;
+
+    // Circuit breaker and WS sends are in-memory — no blocking
     state.circuit_breaker.reset(&req.agent_id);
 
-    let deps = state
-        .dependency_store
-        .find_by_blocker(engine.graph(), &req.agent_id)?;
     let mut nudges = Vec::new();
     for dep in &deps {
         nudges.push(crate::status::NudgeMessage {
@@ -536,7 +621,6 @@ async fn heartbeat(
             .ws_registry
             .send_json(&dep.dependent_agent, "blocker_updated", &notify);
     }
-    drop(engine);
 
     Ok(Json(crate::status::HeartbeatResponse {
         accepted: true,
@@ -576,13 +660,18 @@ async fn create_dependency(
     State(state): State<SharedState>,
     Json(req): Json<CreateDependencyRequest>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let dep = state.dependency_store.create(
-        engine.graph(),
-        req.dependent_agent,
-        req.blocker_agent,
-        req.reason,
-    )?;
+    let state_fb = state.clone();
+    let dep = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.dependency_store.create(
+            engine.graph(),
+            req.dependent_agent,
+            req.blocker_agent,
+            req.reason,
+        )
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok((axum::http::StatusCode::CREATED, Json(dep)))
 }
 
@@ -590,10 +679,15 @@ async fn get_blocker_deps(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let deps = state
-        .dependency_store
-        .find_by_blocker(engine.graph(), &agent_id)?;
+    let state_fb = state.clone();
+    let deps = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .dependency_store
+            .find_by_blocker(engine.graph(), &agent_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(
         serde_json::json!({ "dependencies": deps, "count": deps.len() }),
     ))
@@ -603,10 +697,15 @@ async fn get_dependent_deps(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let deps = state
-        .dependency_store
-        .find_by_dependent(engine.graph(), &agent_id)?;
+    let state_fb = state.clone();
+    let deps = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .dependency_store
+            .find_by_dependent(engine.graph(), &agent_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(
         serde_json::json!({ "dependencies": deps, "count": deps.len() }),
     ))
@@ -616,9 +715,13 @@ async fn resolve_dependency(
     State(state): State<SharedState>,
     Path(dep_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let dep = state.dependency_store.resolve(engine.graph(), &dep_id)?;
-    drop(engine);
+    let state_fb = state.clone();
+    let dep = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.dependency_store.resolve(engine.graph(), &dep_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
 
     let notify = serde_json::json!({
         "dependency_id": dep.dependency_id,
@@ -658,27 +761,32 @@ async fn ingest_hook_event(
     } else {
         EventSeverity::Info
     };
-    let engine = state.engine.lock().unwrap();
-    let event = state.event_bus.ingest(
-        engine.graph(),
-        req.project.clone(),
-        EventType::HookResult,
-        severity,
-        format!("hook:{}", req.hook_name),
-        format!("Hook {} exited {}", req.hook_name, req.exit_code),
-        serde_json::json!({
-            "hook_name": req.hook_name,
-            "exit_code": req.exit_code,
-            "output_preview": req.output.chars().take(200).collect::<String>(),
-        }),
-    )?;
-    drop(engine);
+    let state_fb = state.clone();
+    let event = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.event_bus.ingest(
+            engine.graph(),
+            req.project.clone(),
+            EventType::HookResult,
+            severity,
+            format!("hook:{}", req.hook_name),
+            format!("Hook {} exited {}", req.hook_name, req.exit_code),
+            serde_json::json!({
+                "hook_name": req.hook_name,
+                "exit_code": req.exit_code,
+                "output_preview": req.output.chars().take(200).collect::<String>(),
+            }),
+        )
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     broadcast_to_project(
         &state,
-        &req.project,
+        &event.project,
         "hook_event",
         &serde_json::to_value(&event).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok((axum::http::StatusCode::CREATED, Json(event)))
 }
 
@@ -691,27 +799,32 @@ async fn ingest_gate_event(
     } else {
         EventSeverity::Info
     };
-    let engine = state.engine.lock().unwrap();
-    let event = state.event_bus.ingest(
-        engine.graph(),
-        req.project.clone(),
-        EventType::GateResult,
-        severity,
-        "gate:quality".into(),
-        format!("{}/{} passed", req.gates_passed, req.gates_total),
-        serde_json::json!({
-            "gates_passed": req.gates_passed,
-            "gates_total": req.gates_total,
-            "failures": req.failures,
-        }),
-    )?;
-    drop(engine);
+    let state_fb = state.clone();
+    let event = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.event_bus.ingest(
+            engine.graph(),
+            req.project.clone(),
+            EventType::GateResult,
+            severity,
+            "gate:quality".into(),
+            format!("{}/{} passed", req.gates_passed, req.gates_total),
+            serde_json::json!({
+                "gates_passed": req.gates_passed,
+                "gates_total": req.gates_total,
+                "failures": req.failures,
+            }),
+        )
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     broadcast_to_project(
         &state,
-        &req.project,
+        &event.project,
         "gate_event",
         &serde_json::to_value(&event).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok((axum::http::StatusCode::CREATED, Json(event)))
 }
 
@@ -724,33 +837,38 @@ async fn ingest_ci_event(
         Some("failure") => EventSeverity::Blocking,
         _ => EventSeverity::Info,
     };
-    let engine = state.engine.lock().unwrap();
-    let event = state.event_bus.ingest(
-        engine.graph(),
-        req.project.clone(),
-        EventType::CiStatus,
-        severity,
-        "ci:github".into(),
-        format!(
-            "CI {}: {}",
-            req.run_id,
-            req.conclusion.as_deref().unwrap_or("in_progress")
-        ),
-        serde_json::json!({
-            "run_id": req.run_id,
-            "status": req.status,
-            "conclusion": req.conclusion,
-            "head_branch": req.head_branch,
-            "display_title": req.display_title,
-        }),
-    )?;
-    drop(engine);
+    let state_fb = state.clone();
+    let event = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.event_bus.ingest(
+            engine.graph(),
+            req.project.clone(),
+            EventType::CiStatus,
+            severity,
+            "ci:github".into(),
+            format!(
+                "CI {}: {}",
+                req.run_id,
+                req.conclusion.as_deref().unwrap_or("in_progress")
+            ),
+            serde_json::json!({
+                "run_id": req.run_id,
+                "status": req.status,
+                "conclusion": req.conclusion,
+                "head_branch": req.head_branch,
+                "display_title": req.display_title,
+            }),
+        )
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     broadcast_to_project(
         &state,
-        &req.project,
+        &event.project,
         "ci_event",
         &serde_json::to_value(&event).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok((axum::http::StatusCode::CREATED, Json(event)))
 }
 
@@ -763,26 +881,31 @@ async fn ingest_doc_event(
     } else {
         EventSeverity::Info
     };
-    let engine = state.engine.lock().unwrap();
-    let event = state.event_bus.ingest(
-        engine.graph(),
-        req.project.clone(),
-        EventType::DocSync,
-        severity,
-        "doc:wiki".into(),
-        format!("Docs last updated {}s ago", req.last_updated_seconds),
-        serde_json::json!({
-            "doc_files": req.doc_files,
-            "last_updated_seconds": req.last_updated_seconds,
-        }),
-    )?;
-    drop(engine);
+    let state_fb = state.clone();
+    let event = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.event_bus.ingest(
+            engine.graph(),
+            req.project.clone(),
+            EventType::DocSync,
+            severity,
+            "doc:wiki".into(),
+            format!("Docs last updated {}s ago", req.last_updated_seconds),
+            serde_json::json!({
+                "doc_files": req.doc_files,
+                "last_updated_seconds": req.last_updated_seconds,
+            }),
+        )
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     broadcast_to_project(
         &state,
-        &req.project,
+        &event.project,
         "doc_event",
         &serde_json::to_value(&event).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok((axum::http::StatusCode::CREATED, Json(event)))
 }
 
@@ -795,35 +918,40 @@ async fn ingest_verify_event(
     } else {
         EventSeverity::Info
     };
-    let engine = state.engine.lock().unwrap();
-    let event = state.event_bus.ingest(
-        engine.graph(),
-        req.project.clone(),
-        EventType::TaskVerify,
-        severity,
-        format!("verify:{}", req.task_type),
-        format!(
-            "Deliverable verify: {}/{} passed for {}",
-            req.passed,
-            req.passed + req.failed,
-            req.task_type
-        ),
-        serde_json::json!({
-            "agent_id": req.agent_id,
-            "task_type": req.task_type,
-            "claimed_files": req.claimed_files,
-            "passed": req.passed,
-            "failed": req.failed,
-            "failures": req.failures,
-        }),
-    )?;
-    drop(engine);
+    let state_fb = state.clone();
+    let event = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.event_bus.ingest(
+            engine.graph(),
+            req.project.clone(),
+            EventType::TaskVerify,
+            severity,
+            format!("verify:{}", req.task_type),
+            format!(
+                "Deliverable verify: {}/{} passed for {}",
+                req.passed,
+                req.passed + req.failed,
+                req.task_type
+            ),
+            serde_json::json!({
+                "agent_id": req.agent_id,
+                "task_type": req.task_type,
+                "claimed_files": req.claimed_files,
+                "passed": req.passed,
+                "failed": req.failed,
+                "failures": req.failures,
+            }),
+        )
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     broadcast_to_project(
         &state,
-        &req.project,
+        &event.project,
         "verify_event",
         &serde_json::to_value(&event).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok((axum::http::StatusCode::CREATED, Json(event)))
 }
 
@@ -840,14 +968,18 @@ async fn query_events(
     State(state): State<SharedState>,
     Query(params): Query<EventQueryParams>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let events = state.event_bus.query(
-        engine.graph(),
-        &params.project,
-        params.since.as_deref(),
-        Some(params.limit.unwrap_or(50).min(100)),
-    )?;
-    drop(engine);
+    let state_fb = state.clone();
+    let project = params.project.clone();
+    let since = params.since.clone();
+    let limit = params.limit.unwrap_or(50).min(100);
+    let events = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .event_bus
+            .query(engine.graph(), &project, since.as_deref(), Some(limit))
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(serde_json::json!({
         "events": events,
         "count": events.len(),
@@ -860,20 +992,25 @@ async fn propose_task(
     State(state): State<SharedState>,
     Json(req): Json<task::ProposeTaskRequest>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let task = state.task_store.propose(
-        engine.graph(),
-        req.project.clone(),
-        req.description,
-        req.blocked_by,
-    )?;
-    drop(engine);
+    let state_fb = state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.task_store.propose(
+            engine.graph(),
+            req.project.clone(),
+            req.description,
+            req.blocked_by,
+        )
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     broadcast_to_project(
         &state,
-        &req.project,
+        &task.project,
         "task_proposed",
         &serde_json::to_value(&task).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok((axum::http::StatusCode::CREATED, Json(task)))
 }
 
@@ -882,17 +1019,22 @@ async fn claim_task(
     Path(task_id): Path<String>,
     Json(req): Json<task::ClaimTaskRequest>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let task = state
-        .task_store
-        .claim(engine.graph(), &task_id, req.agent_id)?;
-    drop(engine);
+    let state_fb = state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .task_store
+            .claim(engine.graph(), &task_id, req.agent_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     broadcast_to_project(
         &state,
         &task.project,
         "task_claimed",
         &serde_json::to_value(&task).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok(Json(task))
 }
 
@@ -900,17 +1042,22 @@ async fn claim_next_task(
     State(state): State<SharedState>,
     Json(req): Json<task::ClaimNextRequest>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let task = state
-        .task_store
-        .claim_next(engine.graph(), &req.project, req.agent_id)?;
-    drop(engine);
+    let state_fb = state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .task_store
+            .claim_next(engine.graph(), &req.project, req.agent_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     broadcast_to_project(
         &state,
         &task.project,
         "task_claimed",
         &serde_json::to_value(&task).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok((axum::http::StatusCode::CREATED, Json(task)))
 }
 
@@ -921,33 +1068,47 @@ async fn update_task_state(
 ) -> Result<impl IntoResponse> {
     let new_state: TaskState = req.state.parse()?;
     let is_done = new_state == TaskState::Done;
-    let engine = state.engine.lock().unwrap();
-    let task =
-        state
-            .task_store
-            .update_state(engine.graph(), &task_id, new_state, req.checkpoint, None)?;
-    if is_done {
-        let blocked = state.task_store.find_blocked_by(engine.graph(), &task_id)?;
-        for bt in &blocked {
-            let notify = serde_json::json!({
-                "resolved_dependency": task_id,
-                "task_id": bt.id,
-                "message": format!("Dependency {} resolved — can proceed", task_id),
-            });
-            if let Some(ref claimant) = bt.claimed_by {
-                state
-                    .ws_registry
-                    .send_json(claimant, "dependency_resolved", &notify);
-            }
+    let state_fb = state.clone();
+    let tid = task_id.clone();
+    let (task, blocked) = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        let task = state_fb.task_store.update_state(
+            engine.graph(),
+            &tid,
+            new_state,
+            req.checkpoint,
+            None,
+        )?;
+        let blocked = if is_done {
+            state_fb.task_store.find_blocked_by(engine.graph(), &tid)?
+        } else {
+            Vec::new()
+        };
+        Ok::<_, EnvoyError>((task, blocked))
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
+
+    // WS notifications are in-memory
+    for bt in &blocked {
+        let notify = serde_json::json!({
+            "resolved_dependency": task_id,
+            "task_id": bt.id,
+            "message": format!("Dependency {} resolved — can proceed", task_id),
+        });
+        if let Some(ref claimant) = bt.claimed_by {
+            state
+                .ws_registry
+                .send_json(claimant, "dependency_resolved", &notify);
         }
     }
-    drop(engine);
     broadcast_to_project(
         &state,
         &task.project,
         "task_state_changed",
         &serde_json::to_value(&task).unwrap_or_default(),
-    );
+    )
+    .await;
     Ok(Json(task))
 }
 
@@ -963,11 +1124,16 @@ async fn list_tasks(
     Query(params): Query<ListTasksQuery>,
 ) -> Result<impl IntoResponse> {
     let filter = params.state.as_deref().and_then(|s| s.parse().ok());
-    let engine = state.engine.lock().unwrap();
-    let tasks = state
-        .task_store
-        .list(engine.graph(), &params.project, filter.as_ref())?;
-    drop(engine);
+    let state_fb = state.clone();
+    let project = params.project.clone();
+    let tasks = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .task_store
+            .list(engine.graph(), &project, filter.as_ref())
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(serde_json::json!({
         "tasks": tasks,
         "count": tasks.len(),
@@ -978,9 +1144,13 @@ async fn get_task(
     State(state): State<SharedState>,
     Path(task_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let task = state.task_store.get(engine.graph(), &task_id)?;
-    drop(engine);
+    let state_fb = state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.task_store.get(engine.graph(), &task_id)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(task))
 }
 
@@ -997,11 +1167,17 @@ async fn subscribe_agent(
             "agent_id and project required".into(),
         ));
     }
-    let engine = state.engine.lock().unwrap();
-    state
-        .subscription_store
-        .subscribe(engine.graph(), agent_id, project)?;
-    drop(engine);
+    let state_fb = state.clone();
+    let aid = agent_id.to_string();
+    let proj = project.to_string();
+    tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .subscription_store
+            .subscribe(engine.graph(), &aid, &proj)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok((
         axum::http::StatusCode::CREATED,
         Json(serde_json::json!({"subscribed": true, "agent_id": agent_id, "project": project})),
@@ -1012,11 +1188,15 @@ async fn unsubscribe_agent(
     State(state): State<SharedState>,
     Path((agent_id, project)): Path<(String, String)>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    state
-        .subscription_store
-        .unsubscribe(engine.graph(), &agent_id, &project)?;
-    drop(engine);
+    let state_fb = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .subscription_store
+            .unsubscribe(engine.graph(), &agent_id, &project)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(serde_json::json!({"unsubscribed": true})))
 }
 
@@ -1024,9 +1204,14 @@ async fn list_subscriptions(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let subs = state.subscription_store.list(engine.graph(), &agent_id)?;
-    drop(engine);
+    let state_fb = state.clone();
+    let aid = agent_id.clone();
+    let subs = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.subscription_store.list(engine.graph(), &aid)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(
         serde_json::json!({"agent_id": agent_id, "subscriptions": subs}),
     ))
@@ -1038,9 +1223,13 @@ async fn get_project_config(
     State(state): State<SharedState>,
     Path(project): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let engine = state.engine.lock().unwrap();
-    let cfg = state.project_config_store.get(engine.graph(), &project)?;
-    drop(engine);
+    let state_fb = state.clone();
+    let cfg = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.project_config_store.get(engine.graph(), &project)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(cfg))
 }
 
@@ -1051,9 +1240,13 @@ async fn set_project_config(
 ) -> Result<impl IntoResponse> {
     let mut cfg = cfg;
     cfg.project = project.clone();
-    let engine = state.engine.lock().unwrap();
-    state.project_config_store.set(engine.graph(), &cfg)?;
-    drop(engine);
+    let state_fb = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.project_config_store.set(engine.graph(), &cfg)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     Ok(Json(
         serde_json::json!({"configured": true, "project": project}),
     ))
@@ -1065,19 +1258,24 @@ async fn ws_handler(
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
     {
-        let engine = state.engine.lock().unwrap();
-        let _ = state.agent_registry.heartbeat(
-            engine.graph(),
-            &agent_id,
-            crate::status::AgentStatusSnapshot {
-                state: crate::status::AgentState::Working,
-                task_id: None,
-                blocked_reason: None,
-                waiting_on_agent: None,
-                checkpoint: Some("ws_connected".into()),
-                working_on: "connected via WS".into(),
-            },
-        );
+        let state_fb = state.clone();
+        let agent_id = agent_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let engine = state_fb.engine.lock().unwrap();
+            state_fb.agent_registry.heartbeat(
+                engine.graph(),
+                &agent_id,
+                crate::status::AgentStatusSnapshot {
+                    state: crate::status::AgentState::Working,
+                    task_id: None,
+                    blocked_reason: None,
+                    waiting_on_agent: None,
+                    checkpoint: Some("ws_connected".into()),
+                    working_on: "connected via WS".into(),
+                },
+            )
+        })
+        .await;
     }
 
     Ok(ws.on_upgrade(move |socket| handle_ws(socket, state, agent_id)))
@@ -1088,35 +1286,45 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
 
     // Catch-up: undelivered messages for this agent
     {
-        let pending = state.with_graph(|g| state.message_store.poll(g, &agent_id, 0, 100, true));
-        if let Ok(pending) = pending {
-            for msg in &pending {
-                let event = serde_json::json!({"event": "message", "data": msg});
-                if socket
-                    .send(Message::Text(event.to_string().into()))
-                    .await
-                    .is_err()
-                {
-                    state.ws_registry.unregister(&agent_id);
-                    return;
-                }
+        let state_fb = state.clone();
+        let agent_id_fb = agent_id.clone();
+        let pending = tokio::task::spawn_blocking(move || {
+            let engine = state_fb.engine.lock().unwrap();
+            state_fb
+                .message_store
+                .poll(engine.graph(), &agent_id_fb, 0, 100, true)
+        })
+        .await
+        .unwrap_or(Ok(Vec::new()))
+        .unwrap_or_default();
+        for msg in &pending {
+            let event = serde_json::json!({"event": "message", "data": msg});
+            if socket
+                .send(Message::Text(event.to_string().into()))
+                .await
+                .is_err()
+            {
+                state.ws_registry.unregister(&agent_id);
+                return;
             }
         }
     }
 
     // Catch-up: undelivered events for subscribed projects (dead-letter replay)
-    {
-        let catchup_events: Vec<serde_json::Value> = {
-            let engine = state.engine.lock().unwrap();
-            let projects = state
+    let catchup_events: Vec<serde_json::Value> = {
+        let state_fb = state.clone();
+        let agent_id_fb = agent_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let engine = state_fb.engine.lock().unwrap();
+            let projects = state_fb
                 .subscription_store
-                .list(engine.graph(), &agent_id)
+                .list(engine.graph(), &agent_id_fb)
                 .unwrap_or_default();
             let mut payloads = Vec::new();
             for project in &projects {
-                if let Ok(events) = state.delivery_tracker.get_undelivered(
+                if let Ok(events) = state_fb.delivery_tracker.get_undelivered(
                     engine.graph(),
-                    &agent_id,
+                    &agent_id_fb,
                     project,
                     Some(50),
                 ) {
@@ -1130,32 +1338,41 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
                 }
             }
             payloads
-        };
-        for msg in &catchup_events {
-            if socket
-                .send(Message::Text(msg.to_string().into()))
-                .await
-                .is_err()
-            {
-                state.ws_registry.unregister(&agent_id);
-                return;
-            }
-        }
-        // Mark catch-up events as delivered
+        })
+        .await
+        .unwrap_or_default()
+    };
+    for msg in &catchup_events {
+        if socket
+            .send(Message::Text(msg.to_string().into()))
+            .await
+            .is_err()
         {
-            let engine = state.engine.lock().unwrap();
+            state.ws_registry.unregister(&agent_id);
+            return;
+        }
+    }
+    // Mark catch-up events as delivered
+    if !catchup_events.is_empty() {
+        let state_fb = state.clone();
+        let agent_id_fb = agent_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let engine = state_fb.engine.lock().unwrap();
             for msg in &catchup_events {
                 if let Some(eid) = msg
                     .get("data")
                     .and_then(|d| d.get("id"))
                     .and_then(|v| v.as_str())
                 {
-                    let _ = state
-                        .delivery_tracker
-                        .record_delivery(engine.graph(), &agent_id, eid);
+                    let _ = state_fb.delivery_tracker.record_delivery(
+                        engine.graph(),
+                        &agent_id_fb,
+                        eid,
+                    );
                 }
             }
-        }
+        })
+        .await;
     }
 
     // Connected event
@@ -1199,14 +1416,19 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
                                     if let Some(data) = hb.get("data") {
                                         status = serde_json::from_value::<crate::status::AgentStatusSnapshot>(data.clone()).ok();
                                     }
-                                    let accepted = if let Some(ref st) = status {
-                                        let engine = state.engine.lock().unwrap();
-                                        state.agent_registry.heartbeat(engine.graph(), &agent_id, st.clone()).is_ok()
-                                    } else {
-                                        let engine = state.engine.lock().unwrap();
-                                        state.agent_registry.heartbeat(engine.graph(), &agent_id,
-                                            crate::status::AgentStatusSnapshot::default()).is_ok()
-                                    };
+                                    let state_fb = state.clone();
+                                    let agent_id_fb = agent_id.clone();
+                                    let accepted = tokio::task::spawn_blocking(move || {
+                                        let engine = state_fb.engine.lock().unwrap();
+                                        if let Some(ref st) = status {
+                                            state_fb.agent_registry.heartbeat(engine.graph(), &agent_id_fb, st.clone()).is_ok()
+                                        } else {
+                                            state_fb.agent_registry.heartbeat(engine.graph(), &agent_id_fb,
+                                                crate::status::AgentStatusSnapshot::default()).is_ok()
+                                        }
+                                    })
+                                    .await
+                                    .unwrap_or(false);
                                     let _ = socket.send(Message::Text(
                                         serde_json::json!({
                                             "type": "heartbeat_ack",
@@ -1239,23 +1461,33 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
 }
 
 /// Broadcast an event to all agents subscribed to a project.
-fn broadcast_to_project(
+async fn broadcast_to_project(
     state: &SharedState,
     project: &str,
     event_type: &str,
     data: &serde_json::Value,
 ) {
-    let subs = {
-        let engine = state.engine.lock().unwrap();
-        state
+    // Fetch subscribers via blocking pool
+    let state_c = state.clone();
+    let project_owned = project.to_string();
+    let subs = match tokio::task::spawn_blocking(move || {
+        let engine = state_c.engine.lock().unwrap();
+        state_c
             .subscription_store
-            .subscribers(engine.graph(), project)
+            .subscribers(engine.graph(), &project_owned)
             .unwrap_or_default()
+    })
+    .await
+    {
+        Ok(s) => s,
+        Err(_) => return,
     };
-    // Extract event ID from data for delivery tracking
+
     let event_id = data.get("id").and_then(|v| v.as_str());
+    let mut delivery_pairs: Vec<(String, String)> = Vec::new();
+
+    // WS sends are in-memory — safe on async runtime
     for agent_id in &subs {
-        // Circuit breaker: skip delivery to agents with open circuits
         match state.circuit_breaker.check(agent_id) {
             circuit::CanDeliver::No => continue,
             circuit::CanDeliver::Yes | circuit::CanDeliver::Probe => {}
@@ -1264,13 +1496,24 @@ fn broadcast_to_project(
         if delivered {
             state.circuit_breaker.record_success(agent_id);
             if let Some(eid) = event_id {
-                let engine = state.engine.lock().unwrap();
-                let _ = state
-                    .delivery_tracker
-                    .record_delivery(engine.graph(), agent_id, eid);
+                delivery_pairs.push((agent_id.clone(), eid.to_string()));
             }
         } else {
             state.circuit_breaker.record_failure(agent_id);
         }
+    }
+
+    // Record deliveries via blocking pool
+    if !delivery_pairs.is_empty() {
+        let state_c = state.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let engine = state_c.engine.lock().unwrap();
+            for (agent_id, eid) in &delivery_pairs {
+                let _ = state_c
+                    .delivery_tracker
+                    .record_delivery(engine.graph(), agent_id, eid);
+            }
+        })
+        .await;
     }
 }

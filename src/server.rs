@@ -23,20 +23,29 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            if let Ok(engine) = purge_state.engine.lock() {
-                if let Ok(purged) = purge_state.event_bus.purge_old_events(engine.graph()) {
-                    if purged > 0 {
-                        eprintln!("purged {} events older than 24h", purged);
-                    }
-                }
-                if let Ok(purged) = purge_state
+            let state_fb = purge_state.clone();
+            let (events_purged, deliveries_purged) = tokio::task::spawn_blocking(move || {
+                let engine = state_fb.engine.lock().unwrap();
+                let ep = state_fb
+                    .event_bus
+                    .purge_old_events(engine.graph())
+                    .unwrap_or(0);
+                let dp = state_fb
                     .delivery_tracker
                     .purge_deliveries(engine.graph())
-                {
-                    if purged > 0 {
-                        eprintln!("purged {} delivery records older than 24h", purged);
-                    }
-                }
+                    .unwrap_or(0);
+                (ep, dp)
+            })
+            .await
+            .unwrap_or((0, 0));
+            if events_purged > 0 {
+                eprintln!("purged {} events older than 24h", events_purged);
+            }
+            if deliveries_purged > 0 {
+                eprintln!(
+                    "purged {} delivery records older than 24h",
+                    deliveries_purged
+                );
             }
         }
     });
