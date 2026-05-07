@@ -69,8 +69,16 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
 
     println!("envoy server listening on {addr}, db={db_path}");
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| crate::error::EnvoyError::WsError(format!("server error: {e}")))?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install CTRL+C handler");
+    eprintln!("received shutdown signal, draining...");
 }
