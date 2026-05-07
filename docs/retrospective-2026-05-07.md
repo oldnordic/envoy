@@ -47,13 +47,25 @@ The team self-coordinated on task splitting (3 tracks for deliverable verificati
 
 ## Action Items
 
-| # | Action | Owner | Priority |
-|---|--------|-------|----------|
-| 1 | E2E client-to-client message test (plugin → server → plugin) | Claude2 | P0 |
-| 2 | Verification skill must test full stack, not just server endpoints | All | P0 |
-| 3 | No permanent curl fallback — fix MCP tools promptly, do not let curl become a permanent workaround | All | P0 |
-| 4 | Channel push smoke test — verify render issue is resolved (Claude2 may have fixed in msg #211) | Claude1 | P1 |
-| 5 | Per-agent state isolation audit — check all shared state paths | Claude1 | P1 |
-| 6 | Rate limiting per agent (P0 from clawhip) | Unassigned | P1 |
-| 7 | Provenance system — `envoy explain` for routing trace (P0 from clawhip) | Unassigned | P2 |
-| 8 | Dead letter queue for undeliverable messages (P1 from clawhip) | Unassigned | P2 |
+| # | Action | Owner | Priority | Status |
+|---|--------|-------|----------|--------|
+| 1 | E2E full-stack message test (25 tests) | Claude1 | P0 | **Done** |
+| 2 | Evidence gate: cargo test in verify-rust hook | Claude1 | P0 | **Done** |
+| 3 | No-curl hook (global, blocks on curl to localhost) | Claude1 | P0 | **Done** |
+| 4 | Plugin startup health check (send→poll→poll→ACK→verify) | Claude1 | P1 | **Done** |
+| 5 | Stale-state detector on plugin startup | Claude1 | P1 | **Done** |
+| 6 | Rate limiting per agent | Unassigned | P1 | Backlog |
+| 7 | Provenance system — `envoy explain` | Unassigned | P2 | Backlog |
+| 8 | Dead letter queue | Unassigned | P2 | Backlog |
+| 9 | Kill status reports — use kanban + commits, envoy for decisions only | All | P2 | **Convention set** |
+| 10 | One E2E test per feature (deliverables.json updated) | All | P2 | **Done** |
+| 11 | Kanban triage — 21 ready → 5 todo, 3 ready, 13 backlog | Claude1 | P2 | **Done** |
+
+## Convention: No Status Reports via Envoy
+
+Envoy messages are for **decisions** and **coordination**, not status updates.
+- Status is self-evident: check the kanban, check git log.
+- If you completed work: update kanban, commit, push. No message needed.
+- If you need a decision: send a message with the question and options.
+- If you found a bug: send a message with the diagnosis and proposed fix.
+- "Status: I'm done with X" is noise. "Should we do A or B for X?" is signal.
