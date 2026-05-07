@@ -283,6 +283,7 @@ pub fn build_router(state: SharedState) -> Router {
         // WebSocket
         .route("/ws/{agent_id}", get(ws_handler))
         .with_state(state)
+        .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
 }
 
 // ── Request/Response types ──
@@ -439,6 +440,13 @@ async fn send_message(
         return Err(EnvoyError::AgentOffline(req.from));
     }
 
+    // Reject self-messaging
+    if req.from == req.to {
+        return Err(EnvoyError::InvalidMessage(
+            "cannot send message to self".into(),
+        ));
+    }
+
     // Verify recipient exists (in-memory)
     let _recipient = state.agent_registry.get(&req.to)?;
     let recipient = req.to.clone();
@@ -502,7 +510,7 @@ async fn poll_messages(
     let _ = state.agent_registry.get(&query.to)?;
 
     let since = query.since.unwrap_or(0);
-    let limit = query.limit.min(100);
+    let limit = query.limit.clamp(1, 100);
     let include_acked = query.include.as_deref() == Some("acked");
 
     let state_fb = state.clone();
@@ -1167,6 +1175,8 @@ async fn subscribe_agent(
             "agent_id and project required".into(),
         ));
     }
+    // Verify agent exists before subscribing
+    state.agent_registry.get(agent_id)?;
     let state_fb = state.clone();
     let aid = agent_id.to_string();
     let proj = project.to_string();
