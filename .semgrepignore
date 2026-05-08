@@ -1,0 +1,7 @@
+target/
+.claude/
+.magellan/
+.remember/
+.drafts/
+node_modules/
+tests/
