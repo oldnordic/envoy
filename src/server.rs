@@ -71,7 +71,7 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
         doc::run_doc_monitor(doc_state, "magellan".into(), ".".into(), 300).await;
     });
 
-    let app = build_router(state);
+    let app = build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| crate::error::EnvoyError::WsError(format!("failed to bind {addr}: {e}")))?;

@@ -212,33 +212,35 @@ pub async fn run_nudge_loop(state: Arc<AppState>) {
 
 pub type SharedState = Arc<AppState>;
 
-/// Build the envoy HTTP router.
+/// Build the envoy HTTP router with rate limiting.
 pub fn build_router(state: SharedState) -> Router {
+    let governor_config = Arc::new(
+        tower_governor::governor::GovernorConfigBuilder::default()
+            .const_per_second(100)
+            .const_burst_size(500)
+            .finish()
+            .unwrap(),
+    );
     Router::new()
-        // Agents
         .route("/agents", get(list_agents).post(register_agent))
         .route(
             "/agents/{agent_id}",
             get(get_agent).delete(disconnect_agent),
         )
         .route("/agents/{agent_id}/messages/pending", get(pending_messages))
-        // Messages
         .route("/messages", get(poll_messages).post(send_message))
         .route("/messages/{message_id}", get(get_message))
         .route(
             "/messages/{message_id}/ack",
             axum::routing::post(ack_message),
         )
-        // Circuit Breaker
         .route("/agents/{agent_id}/circuit", get(get_circuit))
         .route(
             "/agents/{agent_id}/circuit/failure",
             axum::routing::post(record_circuit_failure),
         )
-        // Health
         .route("/health", get(health))
         .route("/stats", get(stats))
-        // Heartbeat + Nudge
         .route("/heartbeat", axum::routing::post(heartbeat))
         .route("/dependencies", axum::routing::post(create_dependency))
         .route("/dependencies/blocker/{agent_id}", get(get_blocker_deps))
@@ -254,36 +256,95 @@ pub fn build_router(state: SharedState) -> Router {
             "/nudge-config",
             get(get_nudge_config).post(update_nudge_config),
         )
-        // Event Bus
         .route("/events/hook", axum::routing::post(ingest_hook_event))
         .route("/events/gate", axum::routing::post(ingest_gate_event))
         .route("/events/ci", axum::routing::post(ingest_ci_event))
         .route("/events/doc", axum::routing::post(ingest_doc_event))
         .route("/events/verify", axum::routing::post(ingest_verify_event))
         .route("/events", get(query_events))
-        // Task Board
         .route("/tasks/propose", axum::routing::post(propose_task))
         .route("/tasks/claim-next", axum::routing::post(claim_next_task))
         .route("/tasks/{id}/claim", axum::routing::post(claim_task))
         .route("/tasks/{id}/state", axum::routing::post(update_task_state))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks", get(list_tasks))
-        // Subscriptions
         .route("/subscriptions", axum::routing::post(subscribe_agent))
         .route(
             "/subscriptions/{agent_id}/{project}",
             axum::routing::delete(unsubscribe_agent),
         )
         .route("/subscriptions/{agent_id}", get(list_subscriptions))
-        // Project Config
         .route(
             "/projects/{name}/config",
             get(get_project_config).post(set_project_config),
         )
-        // WebSocket
         .route("/ws/{agent_id}", get(ws_handler))
         .with_state(state)
         .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
+        .layer(tower_governor::GovernorLayer::new(governor_config))
+}
+
+/// Build the router without rate limiting (for tests).
+pub fn build_router_unlimited(state: SharedState) -> Router {
+    Router::new()
+        .route("/agents", get(list_agents).post(register_agent))
+        .route(
+            "/agents/{agent_id}",
+            get(get_agent).delete(disconnect_agent),
+        )
+        .route("/agents/{agent_id}/messages/pending", get(pending_messages))
+        .route("/messages", get(poll_messages).post(send_message))
+        .route("/messages/{message_id}", get(get_message))
+        .route(
+            "/messages/{message_id}/ack",
+            axum::routing::post(ack_message),
+        )
+        .route("/agents/{agent_id}/circuit", get(get_circuit))
+        .route(
+            "/agents/{agent_id}/circuit/failure",
+            axum::routing::post(record_circuit_failure),
+        )
+        .route("/health", get(health))
+        .route("/stats", get(stats))
+        .route("/heartbeat", axum::routing::post(heartbeat))
+        .route("/dependencies", axum::routing::post(create_dependency))
+        .route("/dependencies/blocker/{agent_id}", get(get_blocker_deps))
+        .route(
+            "/dependencies/dependent/{agent_id}",
+            get(get_dependent_deps),
+        )
+        .route(
+            "/dependencies/{dep_id}/resolve",
+            axum::routing::post(resolve_dependency),
+        )
+        .route(
+            "/nudge-config",
+            get(get_nudge_config).post(update_nudge_config),
+        )
+        .route("/events/hook", axum::routing::post(ingest_hook_event))
+        .route("/events/gate", axum::routing::post(ingest_gate_event))
+        .route("/events/ci", axum::routing::post(ingest_ci_event))
+        .route("/events/doc", axum::routing::post(ingest_doc_event))
+        .route("/events/verify", axum::routing::post(ingest_verify_event))
+        .route("/events", get(query_events))
+        .route("/tasks/propose", axum::routing::post(propose_task))
+        .route("/tasks/claim-next", axum::routing::post(claim_next_task))
+        .route("/tasks/{id}/claim", axum::routing::post(claim_task))
+        .route("/tasks/{id}/state", axum::routing::post(update_task_state))
+        .route("/tasks/{id}", get(get_task))
+        .route("/tasks", get(list_tasks))
+        .route("/subscriptions", axum::routing::post(subscribe_agent))
+        .route(
+            "/subscriptions/{agent_id}/{project}",
+            axum::routing::delete(unsubscribe_agent),
+        )
+        .route("/subscriptions/{agent_id}", get(list_subscriptions))
+        .route(
+            "/projects/{name}/config",
+            get(get_project_config).post(set_project_config),
+        )
+        .route("/ws/{agent_id}", get(ws_handler))
+        .with_state(state)
 }
 
 // ── Request/Response types ──

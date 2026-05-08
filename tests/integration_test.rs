@@ -301,7 +301,7 @@ fn test_app() -> Router {
     let _ = Box::leak(Box::new(dir));
     let engine = envoy::Engine::open(&db_path).unwrap();
     let state = Arc::new(envoy::http::AppState::new(engine).unwrap());
-    envoy::http::build_router(state)
+    envoy::http::build_router_unlimited(state)
 }
 
 #[tokio::test]
@@ -753,7 +753,7 @@ async fn heartbeat_brings_agent_online_after_server_restart() {
     // Session 1: register agent
     let engine1 = envoy::Engine::open(&db_path).unwrap();
     let state1 = Arc::new(envoy::http::AppState::new(engine1).unwrap());
-    let app1 = envoy::http::build_router(state1);
+    let app1 = envoy::http::build_router_unlimited(state1);
 
     app1.clone()
         .oneshot(
@@ -792,7 +792,7 @@ async fn heartbeat_brings_agent_online_after_server_restart() {
     // Session 2: new engine from same DB (simulates restart)
     let engine2 = envoy::Engine::open(&db_path).unwrap();
     let state2 = Arc::new(envoy::http::AppState::new(engine2).unwrap());
-    let app2 = envoy::http::build_router(state2);
+    let app2 = envoy::http::build_router_unlimited(state2);
 
     // Verify agent starts offline after reload
     let resp = app2
@@ -977,7 +977,7 @@ async fn message_ack_lifecycle() {
 async fn deliverable_verify_event_roundtrip() {
     let engine = Engine::open_in_memory().unwrap();
     let state = Arc::new(envoy::http::AppState::new(engine).unwrap());
-    let app = envoy::http::build_router(state.clone());
+    let app = envoy::http::build_router_unlimited(state.clone());
 
     // Ingest a verify event with all passed
     let resp = app
@@ -1047,7 +1047,7 @@ async fn circuit_breaker_lifecycle() {
     // Register an agent
     let engine = Engine::open_in_memory().unwrap();
     let state = Arc::new(envoy::http::AppState::new(engine).unwrap());
-    let app = envoy::http::build_router(state.clone());
+    let app = envoy::http::build_router_unlimited(state.clone());
 
     // Register agent
     let resp = app
