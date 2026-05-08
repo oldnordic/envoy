@@ -1,4 +1,4 @@
-use super::types::{MessageEnvelope, MessageType, Part};
+use super::types::{MessageEnvelope, MessageType, Part, PartContent};
 use crate::error::{EnvoyError, Result};
 
 const KIND_MESSAGE: &str = "EnvoyMessage";
@@ -103,6 +103,29 @@ impl MessageStore {
             sequence_id,
             parts: temp.parts,
         })
+    }
+
+    /// Store a system notification for an offline agent.
+    /// Reuses the message entity schema so it appears in poll/reconnect catch-up.
+    pub fn store_notification(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        to: &str,
+        event_type: &str,
+        data: &serde_json::Value,
+    ) -> Result<MessageEnvelope> {
+        let text = serde_json::to_string(data).unwrap_or_default();
+        self.store(
+            graph,
+            MessageType::System,
+            "envoy".to_string(),
+            to.to_string(),
+            None,
+            Some(event_type.to_string()),
+            vec![Part {
+                content: PartContent::Text(text),
+            }],
+        )
     }
 
     /// Mark a message as consumed (ACKed) by an agent.

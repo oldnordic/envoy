@@ -216,8 +216,8 @@ pub type SharedState = Arc<AppState>;
 pub fn build_router(state: SharedState) -> Router {
     let governor_config = Arc::new(
         tower_governor::governor::GovernorConfigBuilder::default()
-            .const_per_second(100)
-            .const_burst_size(500)
+            .const_per_second(1000)
+            .const_burst_size(5000)
             .finish()
             .unwrap(),
     );
@@ -1576,6 +1576,7 @@ async fn broadcast_to_project(
 
     let event_id = data.get("id").and_then(|v| v.as_str());
     let mut delivery_pairs: Vec<(String, String)> = Vec::new();
+    let mut offline_agents: Vec<String> = Vec::new();
 
     // WS sends are in-memory — safe on async runtime
     for agent_id in &subs {
@@ -1591,6 +1592,7 @@ async fn broadcast_to_project(
             }
         } else {
             state.circuit_breaker.record_failure(agent_id);
+            offline_agents.push(agent_id.clone());
         }
     }
 
@@ -1603,6 +1605,25 @@ async fn broadcast_to_project(
                 let _ = state_c
                     .delivery_tracker
                     .record_delivery(engine.graph(), agent_id, eid);
+            }
+        })
+        .await;
+    }
+
+    // Store notifications for offline agents so they pick them up on poll/reconnect
+    if !offline_agents.is_empty() {
+        let state_c = state.clone();
+        let event_type_owned = event_type.to_string();
+        let data_clone = data.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let engine = state_c.engine.lock().unwrap();
+            for agent_id in &offline_agents {
+                let _ = state_c.message_store.store_notification(
+                    engine.graph(),
+                    agent_id,
+                    &event_type_owned,
+                    &data_clone,
+                );
             }
         })
         .await;

@@ -1161,3 +1161,88 @@ async fn circuit_breaker_lifecycle() {
     assert_eq!(cb["state"], "closed", "heartbeat should close circuit");
     assert_eq!(cb["failure_count"], 0, "failure count should reset");
 }
+
+#[tokio::test]
+async fn offline_broadcast_stores_notification() {
+    let app = test_app();
+
+    // Register an agent (no WS connection = offline for push purposes)
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"offline-agent","kind":"claude"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let agent: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    let agent_id = agent["agent_id"].as_str().unwrap();
+
+    // Subscribe the agent to a project
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/subscriptions")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"agent_id":"{agent_id}","project":"test-proj"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Ingest a hook event — broadcast_to_project should store notification for offline agent
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/events/hook")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"project":"test-proj","hook_name":"verify-rust","exit_code":0,"output":"ok"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Poll messages — offline agent should see the stored notification
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/messages?to={agent_id}&since=0&limit=10"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let poll_body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 8192).await.unwrap())
+            .unwrap();
+
+    let messages = poll_body["messages"].as_array().unwrap();
+    assert!(
+        !messages.is_empty(),
+        "offline agent should see stored notification"
+    );
+
+    let msg = &messages[0];
+    assert_eq!(msg["from"], "envoy");
+    assert_eq!(msg["type"], "system");
+}
