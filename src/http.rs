@@ -269,6 +269,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/tasks/claim-next", axum::routing::post(claim_next_task))
         .route("/tasks/{id}/claim", axum::routing::post(claim_task))
         .route("/tasks/{id}/state", axum::routing::post(update_task_state))
+        .route("/tasks/{id}/audit", get(query_task_audit))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks", get(list_tasks))
         .route("/subscriptions", axum::routing::post(subscribe_agent))
@@ -335,6 +336,7 @@ pub fn build_router_unlimited(state: SharedState) -> Router {
         .route("/tasks/claim-next", axum::routing::post(claim_next_task))
         .route("/tasks/{id}/claim", axum::routing::post(claim_task))
         .route("/tasks/{id}/state", axum::routing::post(update_task_state))
+        .route("/tasks/{id}/audit", get(query_task_audit))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks", get(list_tasks))
         .route("/subscriptions", axum::routing::post(subscribe_agent))
@@ -548,6 +550,7 @@ async fn send_message(
             &stored.to,
             stored.msg_type.clone(),
             &stored.message_id,
+            None,
         );
         Ok::<_, crate::error::EnvoyError>(stored)
     })
@@ -1147,6 +1150,8 @@ struct AuditQueryParams {
     #[serde(default)]
     operation: Option<String>,
     #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
     since: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
@@ -1164,9 +1169,29 @@ async fn query_audit(
             engine.graph(),
             params.agent_id.as_deref(),
             params.operation.as_deref(),
+            params.task_id.as_deref(),
             params.since.as_deref(),
             Some(limit),
         )
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
+    Ok(Json(serde_json::json!({
+        "events": events,
+        "count": events.len(),
+    })))
+}
+
+async fn query_task_audit(
+    State(state): State<SharedState>,
+    Path(task_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let state_fb = state.clone();
+    let events = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb
+            .audit_store
+            .query(engine.graph(), None, None, Some(&task_id), None, Some(50))
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
@@ -1210,11 +1235,16 @@ async fn claim_task(
     Json(req): Json<task::ClaimTaskRequest>,
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
+    let tid = task_id.clone();
     let task = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb
+        let task = state_fb
             .task_store
-            .claim(engine.graph(), &task_id, req.agent_id)
+            .claim(engine.graph(), &tid, req.agent_id.clone())?;
+        let _ = state_fb
+            .audit_store
+            .log_task_claimed(engine.graph(), &tid, &req.agent_id);
+        Ok::<_, crate::error::EnvoyError>(task)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;

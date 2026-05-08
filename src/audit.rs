@@ -32,7 +32,17 @@ impl AuditStore {
         to: &str,
         msg_type: MessageType,
         msg_id: &str,
+        task_id: Option<&str>,
     ) -> Result<()> {
+        let mut data = serde_json::json!({
+            "agent_id": from,
+            "target": to,
+            "msg_type": msg_type.as_str(),
+            "msg_id": msg_id,
+        });
+        if let Some(tid) = task_id {
+            data["task_id"] = serde_json::json!(tid);
+        }
         let _ = self.event_bus.ingest(
             graph,
             AUDIT_PROJECT.to_string(),
@@ -40,12 +50,7 @@ impl AuditStore {
             EventSeverity::Info,
             "message_sent".to_string(),
             format!("Agent {} sent {:?} message to {}", from, msg_type, to),
-            serde_json::json!({
-                "agent_id": from,
-                "target": to,
-                "msg_type": msg_type.as_str(),
-                "msg_id": msg_id,
-            }),
+            data,
         )?;
         Ok(())
     }
@@ -168,12 +173,35 @@ impl AuditStore {
         Ok(())
     }
 
+    /// Log a task claim.
+    pub fn log_task_claimed(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        task_id: &str,
+        agent_id: &str,
+    ) -> Result<()> {
+        let _ = self.event_bus.ingest(
+            graph,
+            AUDIT_PROJECT.to_string(),
+            EventType::AuditLog,
+            EventSeverity::Info,
+            "task_claimed".to_string(),
+            format!("Task {} claimed by agent {}", task_id, agent_id),
+            serde_json::json!({
+                "task_id": task_id,
+                "agent_id": agent_id,
+            }),
+        )?;
+        Ok(())
+    }
+
     /// Query audit records.
     pub fn query(
         &self,
         graph: &sqlitegraph::SqliteGraph,
         agent_id: Option<&str>,
         operation: Option<&str>,
+        task_id: Option<&str>,
         since: Option<&str>,
         limit: Option<i64>,
     ) -> Result<Vec<EnvoyEvent>> {
@@ -192,6 +220,15 @@ impl AuditStore {
             events.retain(|e| e.source == operation);
         }
 
+        if let Some(task_id) = task_id {
+            events.retain(|e| {
+                e.data
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| id == task_id)
+            });
+        }
+
         Ok(events)
     }
 }
@@ -208,10 +245,12 @@ mod tests {
         let audit = AuditStore::new();
 
         audit
-            .log_message(graph, "id1", "id2", MessageType::Direct, "msg-123")
+            .log_message(graph, "id1", "id2", MessageType::Direct, "msg-123", None)
             .unwrap();
 
-        let records = audit.query(graph, Some("id1"), None, None, None).unwrap();
+        let records = audit
+            .query(graph, Some("id1"), None, None, None, None)
+            .unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source, "message_sent");
         assert_eq!(
@@ -232,11 +271,20 @@ mod tests {
         audit.log_agent_disconnected(graph, "id1").unwrap();
 
         let registered = audit
-            .query(graph, Some("id1"), Some("agent_registered"), None, None)
+            .query(
+                graph,
+                Some("id1"),
+                Some("agent_registered"),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(registered.len(), 1);
 
-        let all = audit.query(graph, Some("id1"), None, None, None).unwrap();
+        let all = audit
+            .query(graph, Some("id1"), None, None, None, None)
+            .unwrap();
         assert_eq!(all.len(), 2);
     }
 }

@@ -1433,3 +1433,63 @@ async fn event_ingestion_is_audited() {
     assert!(!events.is_empty(), "event ingestion should be audited");
     assert_eq!(events[0]["source"], "event_ingested");
 }
+
+#[tokio::test]
+async fn task_audit_trail_is_tagged() {
+    let app = test_app();
+
+    // Propose a task
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/tasks/propose")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"project":"test","description":"fix bug"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let task: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    let task_id = task["id"].as_str().unwrap();
+
+    // Claim the task
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/tasks/{task_id}/claim"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"agent_id":"agent-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Query task audit trail
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/tasks/{task_id}/audit"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let audit_body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 8192).await.unwrap())
+            .unwrap();
+
+    let events = audit_body["events"].as_array().unwrap();
+    assert!(!events.is_empty(), "task should have audit trail");
+    assert_eq!(events[0]["source"], "task_claimed");
+}
