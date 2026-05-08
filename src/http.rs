@@ -424,9 +424,19 @@ async fn register_agent(
     let state_fb = state.clone();
     let info = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb
-            .agent_registry
-            .register(engine.graph(), &req.name, &req.kind, req.parent_id)
+        let info = state_fb.agent_registry.register(
+            engine.graph(),
+            &req.name,
+            &req.kind,
+            req.parent_id,
+        )?;
+        let _ = state_fb.audit_store.log_agent_registered(
+            engine.graph(),
+            &info.agent_id,
+            &info.name,
+            &info.kind,
+        );
+        Ok::<_, crate::error::EnvoyError>(info)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
@@ -441,7 +451,11 @@ async fn disconnect_agent(
     let aid = agent_id.clone();
     let affected = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb.agent_registry.disconnect(engine.graph(), &aid)
+        let affected = state_fb.agent_registry.disconnect(engine.graph(), &aid)?;
+        let _ = state_fb
+            .audit_store
+            .log_agent_disconnected(engine.graph(), &aid);
+        Ok::<_, crate::error::EnvoyError>(affected)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
@@ -519,15 +533,23 @@ async fn send_message(
     let state_fb = state.clone();
     let stored = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb.message_store.store(
+        let stored = state_fb.message_store.store(
             engine.graph(),
-            req.msg_type,
+            req.msg_type.clone(),
             req.from.clone(),
             req.to.clone(),
             req.task_id.clone(),
             req.context_id.clone(),
             req.parts,
-        )
+        )?;
+        let _ = state_fb.audit_store.log_message(
+            engine.graph(),
+            &stored.from,
+            &stored.to,
+            stored.msg_type.clone(),
+            &stored.message_id,
+        );
+        Ok::<_, crate::error::EnvoyError>(stored)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;

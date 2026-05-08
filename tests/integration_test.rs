@@ -1246,3 +1246,50 @@ async fn offline_broadcast_stores_notification() {
     assert_eq!(msg["from"], "envoy");
     assert_eq!(msg["type"], "system");
 }
+
+#[tokio::test]
+async fn agent_registration_is_audited() {
+    let app = test_app();
+
+    // Register an agent
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"audit-agent","kind":"claude"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let agent: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    let agent_id = agent["agent_id"].as_str().unwrap();
+
+    // Query audit log for agent registration
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/audit?agent_id={agent_id}&operation=agent_registered"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let audit_body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 8192).await.unwrap())
+            .unwrap();
+
+    let events = audit_body["events"].as_array().unwrap();
+    assert!(!events.is_empty(), "agent registration should be audited");
+    assert_eq!(events[0]["source"], "agent_registered");
+}
