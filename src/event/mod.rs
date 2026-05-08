@@ -19,6 +19,8 @@ impl FromStr for EventType {
             "task_handoff" => Ok(Self::TaskHandoff),
             "gate_block" => Ok(Self::GateBlock),
             "graph_refresh" => Ok(Self::GraphRefresh),
+            "task_verify" => Ok(Self::TaskVerify),
+            "audit_log" => Ok(Self::AuditLog),
             _ => Err(crate::error::EnvoyError::InvalidMessage(format!(
                 "unknown event type: {}",
                 s
@@ -38,6 +40,7 @@ pub enum EventType {
     GateBlock,
     GraphRefresh,
     TaskVerify,
+    AuditLog,
 }
 
 impl EventType {
@@ -51,6 +54,7 @@ impl EventType {
             Self::GateBlock => "gate_block",
             Self::GraphRefresh => "graph_refresh",
             Self::TaskVerify => "task_verify",
+            Self::AuditLog => "audit_log",
         }
     }
 }

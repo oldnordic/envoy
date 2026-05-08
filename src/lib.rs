@@ -5,6 +5,7 @@
 //! agent identity management, and subagent handoff protocol.
 
 pub mod agent;
+pub mod audit;
 pub mod circuit;
 pub mod dependency;
 pub mod engine;

@@ -71,6 +71,7 @@ impl WsRegistry {
 /// Shared application state across all handlers.
 pub struct AppState {
     pub agent_registry: AgentRegistry,
+    pub audit_store: crate::audit::AuditStore,
     pub dependency_store: DependencyStore,
     pub message_store: MessageStore,
     pub event_bus: EventBus,
@@ -90,6 +91,7 @@ impl AppState {
         let agent_registry = AgentRegistry::new(engine.graph())?;
         Ok(Self {
             agent_registry,
+            audit_store: crate::audit::AuditStore::new(),
             dependency_store: DependencyStore::new(),
             message_store: MessageStore::new(),
             event_bus: EventBus::new(),
@@ -262,6 +264,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/events/doc", axum::routing::post(ingest_doc_event))
         .route("/events/verify", axum::routing::post(ingest_verify_event))
         .route("/events", get(query_events))
+        .route("/audit", get(query_audit))
         .route("/tasks/propose", axum::routing::post(propose_task))
         .route("/tasks/claim-next", axum::routing::post(claim_next_task))
         .route("/tasks/{id}/claim", axum::routing::post(claim_task))
@@ -327,6 +330,7 @@ pub fn build_router_unlimited(state: SharedState) -> Router {
         .route("/events/doc", axum::routing::post(ingest_doc_event))
         .route("/events/verify", axum::routing::post(ingest_verify_event))
         .route("/events", get(query_events))
+        .route("/audit", get(query_audit))
         .route("/tasks/propose", axum::routing::post(propose_task))
         .route("/tasks/claim-next", axum::routing::post(claim_next_task))
         .route("/tasks/{id}/claim", axum::routing::post(claim_task))
@@ -1046,6 +1050,42 @@ async fn query_events(
         state_fb
             .event_bus
             .query(engine.graph(), &project, since.as_deref(), Some(limit))
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
+    Ok(Json(serde_json::json!({
+        "events": events,
+        "count": events.len(),
+    })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AuditQueryParams {
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    operation: Option<String>,
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+async fn query_audit(
+    State(state): State<SharedState>,
+    Query(params): Query<AuditQueryParams>,
+) -> Result<impl IntoResponse> {
+    let state_fb = state.clone();
+    let limit = params.limit.unwrap_or(50).min(100);
+    let events = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        state_fb.audit_store.query(
+            engine.graph(),
+            params.agent_id.as_deref(),
+            params.operation.as_deref(),
+            params.since.as_deref(),
+            Some(limit),
+        )
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;

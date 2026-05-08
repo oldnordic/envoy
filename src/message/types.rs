@@ -43,6 +43,17 @@ pub enum MessageType {
     System,
 }
 
+impl MessageType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Handoff => "handoff",
+            Self::Heartbeat => "heartbeat",
+            Self::System => "system",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CompletionStatus {
