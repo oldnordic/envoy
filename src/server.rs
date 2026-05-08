@@ -24,20 +24,23 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             let state_fb = purge_state.clone();
-            let (events_purged, deliveries_purged) = tokio::task::spawn_blocking(move || {
-                let engine = state_fb.engine.lock().unwrap();
-                let ep = state_fb
-                    .event_bus
-                    .purge_old_events(engine.graph())
-                    .unwrap_or(0);
-                let dp = state_fb
-                    .delivery_tracker
-                    .purge_deliveries(engine.graph())
-                    .unwrap_or(0);
-                (ep, dp)
-            })
-            .await
-            .unwrap_or((0, 0));
+            let (events_purged, deliveries_purged, agents_purged, circuits_evicted) =
+                tokio::task::spawn_blocking(move || {
+                    let engine = state_fb.engine.lock().unwrap();
+                    let ep = state_fb
+                        .event_bus
+                        .purge_old_events(engine.graph())
+                        .unwrap_or(0);
+                    let dp = state_fb
+                        .delivery_tracker
+                        .purge_deliveries(engine.graph())
+                        .unwrap_or(0);
+                    let ap = state_fb.agent_registry.purge_offline(24);
+                    let ce = state_fb.circuit_breaker.evict_stale();
+                    (ep, dp, ap, ce)
+                })
+                .await
+                .unwrap_or((0, 0, 0, 0));
             if events_purged > 0 {
                 eprintln!("purged {} events older than 24h", events_purged);
             }
@@ -46,6 +49,12 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
                     "purged {} delivery records older than 24h",
                     deliveries_purged
                 );
+            }
+            if agents_purged > 0 {
+                eprintln!("purged {} agents offline >24h", agents_purged);
+            }
+            if circuits_evicted > 0 {
+                eprintln!("evicted {} stale circuit breaker entries", circuits_evicted);
             }
         }
     });

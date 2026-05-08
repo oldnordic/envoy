@@ -336,6 +336,40 @@ impl AgentRegistry {
             .cloned()
             .collect()
     }
+
+    /// Remove offline agents that haven't heartbeated in 24+ hours.
+    /// Returns the number of purged agents.
+    pub fn purge_offline(&self, threshold_hours: i64) -> usize {
+        let mut tree = self.tree.lock().unwrap();
+        let now = chrono::Utc::now();
+        let before = tree.agents.len();
+        let stale_ids: Vec<String> = tree
+            .agents
+            .iter()
+            .filter(|(_, info)| {
+                if info.online {
+                    return false;
+                }
+                if let Some(ref ts) = info.last_heartbeat_at {
+                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                        let age = now - dt.with_timezone(&chrono::Utc);
+                        return age.num_hours() >= threshold_hours;
+                    }
+                }
+                false
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale_ids {
+            tree.children.remove(id);
+            // Remove from parent's children list
+            tree.children.values_mut().for_each(|list| {
+                list.retain(|c| c != id);
+            });
+            tree.agents.remove(id);
+        }
+        before - tree.agents.len()
+    }
 }
 
 fn agent_to_json(info: &AgentInfo) -> serde_json::Value {

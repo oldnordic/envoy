@@ -157,6 +157,19 @@ impl CircuitBreaker {
         states.remove(agent_id);
     }
 
+    /// Evict entries that have been Open for longer than 1 hour.
+    /// Returns the number of evicted entries.
+    pub fn evict_stale(&self) -> usize {
+        let mut states = self.states.lock().unwrap();
+        let cutoff = Utc::now() - chrono::Duration::hours(1);
+        let before = states.len();
+        states.retain(|_, state| match state {
+            CircuitState::Open { opened_at, .. } => *opened_at > cutoff,
+            _ => true,
+        });
+        before - states.len()
+    }
+
     /// Get current state for status queries.
     pub fn get_state(&self, agent_id: &str) -> CircuitStatus {
         let states = self.states.lock().unwrap();

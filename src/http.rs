@@ -373,14 +373,14 @@ async fn disconnect_agent(
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
+    let aid = agent_id.clone();
     let affected = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb
-            .agent_registry
-            .disconnect(engine.graph(), &agent_id)
+        state_fb.agent_registry.disconnect(engine.graph(), &aid)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
+    state.circuit_breaker.remove(&agent_id);
     Ok(Json(
         serde_json::json!({"disconnected": true, "affected": affected}),
     ))
