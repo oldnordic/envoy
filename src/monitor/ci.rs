@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use crate::event::{EventSeverity, EventType};
@@ -17,7 +16,7 @@ pub async fn run_ci_monitor(
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
 
-        let output = Command::new("gh")
+        let output = tokio::process::Command::new("gh")
             .args([
                 "run",
                 "list",
@@ -28,7 +27,8 @@ pub async fn run_ci_monitor(
                 "--json",
                 "status,conclusion,headBranch,displayTitle,databaseId",
             ])
-            .output();
+            .output()
+            .await;
 
         let stdout = match output {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
