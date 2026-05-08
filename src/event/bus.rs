@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use sqlitegraph::GraphEntity;
 
 use crate::error::Result;
@@ -75,7 +76,7 @@ impl DeliveryTracker {
             .filter_map(|e| entity_to_event(e).ok())
             .collect();
 
-        undelivered.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        undelivered.sort_by_key(|a| a.timestamp);
         if let Some(limit) = limit {
             undelivered.truncate(limit as usize);
         }
@@ -84,14 +85,18 @@ impl DeliveryTracker {
 
     /// Clean up delivery records older than 24h.
     pub fn purge_deliveries(&self, graph: &sqlitegraph::SqliteGraph) -> Result<usize> {
-        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
         let deliveries = graph.find_entities_by_kind(KIND_DELIVERY)?;
         let mut purged = 0usize;
         for d in &deliveries {
             let ts = read_str(&d.data, "delivered_at");
-            if !ts.is_empty() && ts.as_str() < cutoff.as_str() && graph.delete_entity(d.id).is_ok()
-            {
-                purged += 1;
+            if let Ok(dt) = DateTime::parse_from_rfc3339(&ts) {
+                if dt.with_timezone(&Utc) < cutoff {
+                    match graph.delete_entity(d.id) {
+                        Ok(()) => purged += 1,
+                        Err(e) => eprintln!("warn: failed to purge delivery {}: {}", d.id, e),
+                    }
+                }
             }
         }
         Ok(purged)
@@ -122,7 +127,7 @@ impl EventBus {
         message: String,
         data: serde_json::Value,
     ) -> Result<EnvoyEvent> {
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        let timestamp = chrono::Utc::now();
         let name = format!("evt-{}", uuid::Uuid::new_v4());
         let entity = GraphEntity {
             id: 0,
@@ -136,7 +141,7 @@ impl EventBus {
                 "source": source,
                 "message": message,
                 "data": data,
-                "timestamp": timestamp,
+                "timestamp": timestamp.to_rfc3339(),
             }),
         };
         let id = graph.insert_entity(&entity)?;
@@ -160,14 +165,19 @@ impl EventBus {
         since: Option<&str>,
         limit: Option<i64>,
     ) -> Result<Vec<EnvoyEvent>> {
+        let since_dt: Option<DateTime<Utc>> = since.and_then(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        });
         let entities = graph.find_entities_by_kind(KIND_EVENT)?;
         let mut events: Vec<EnvoyEvent> = entities
             .iter()
             .filter(|e| read_str(&e.data, "project") == project)
-            .filter(|e| since.is_none_or(|s| read_str(&e.data, "timestamp").as_str() > s))
+            .filter(|e| since_dt.is_none_or(|since| parse_ts(&e.data).is_some_and(|ts| ts > since)))
             .filter_map(|e| entity_to_event(e).ok())
             .collect();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
         if let Some(limit) = limit {
             events.truncate(limit as usize);
         }
@@ -175,14 +185,15 @@ impl EventBus {
     }
 
     pub fn purge_old_events(&self, graph: &sqlitegraph::SqliteGraph) -> Result<usize> {
-        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
         let entities = graph.find_entities_by_kind(KIND_EVENT)?;
         let mut purged = 0usize;
         for e in &entities {
-            let ts = read_str(&e.data, "timestamp");
-            if !ts.is_empty() && ts.as_str() < cutoff.as_str() && graph.delete_entity(e.id).is_ok()
-            {
-                purged += 1;
+            if parse_ts(&e.data).is_some_and(|ts| ts < cutoff) {
+                match graph.delete_entity(e.id) {
+                    Ok(()) => purged += 1,
+                    Err(err) => eprintln!("warn: failed to purge event {}: {}", e.id, err),
+                }
             }
         }
         Ok(purged)
@@ -190,6 +201,10 @@ impl EventBus {
 }
 
 fn entity_to_event(entity: &sqlitegraph::GraphEntity) -> Result<EnvoyEvent> {
+    let ts_str = read_str(&entity.data, "timestamp");
+    let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
     Ok(EnvoyEvent {
         id: entity.id.to_string(),
         project: read_str(&entity.data, "project"),
@@ -208,7 +223,7 @@ fn entity_to_event(entity: &sqlitegraph::GraphEntity) -> Result<EnvoyEvent> {
             .get("data")
             .cloned()
             .unwrap_or(serde_json::Value::Null),
-        timestamp: read_str(&entity.data, "timestamp"),
+        timestamp,
     })
 }
 
@@ -217,6 +232,12 @@ fn read_str(data: &serde_json::Value, key: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+fn parse_ts(data: &serde_json::Value) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&read_str(data, "timestamp"))
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 #[cfg(test)]

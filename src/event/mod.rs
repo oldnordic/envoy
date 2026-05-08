@@ -2,6 +2,7 @@ pub mod bus;
 
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub const KIND_EVENT: &str = "EnvoyEvent";
@@ -81,7 +82,7 @@ pub struct EnvoyEvent {
     pub source: String,
     pub message: String,
     pub data: serde_json::Value,
-    pub timestamp: String,
+    pub timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]

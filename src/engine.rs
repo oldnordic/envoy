@@ -327,7 +327,12 @@ impl Engine {
 
         // O(1): delete edge by stored ID instead of scanning all SUBSCRIBES_TO edges
         if let Some(edge_id) = sub_entity.data.get("sub_edge_id").and_then(|v| v.as_i64()) {
-            let _ = self.graph.delete_edge(edge_id);
+            if let Err(e) = self.graph.delete_edge(edge_id) {
+                eprintln!(
+                    "warn: failed to delete subscription edge {}: {}",
+                    edge_id, e
+                );
+            }
         }
 
         self.graph.delete_entity(sub_entity.id)?;
