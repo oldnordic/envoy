@@ -1464,7 +1464,7 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
                             break;
                         }
                     }
-                    // Channel overflowed — re-subscribe at current position
+                    // Channel overflowed — replay missed messages from store
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         let _ = socket.send(Message::Text(
                             serde_json::json!({
@@ -1472,6 +1472,26 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
                                 "data": { "skipped": n }
                             }).to_string().into()
                         )).await;
+
+                        // Replay unACKed messages from persistent store
+                        let state_fb = state.clone();
+                        let agent_id_fb = agent_id.clone();
+                        let replay = tokio::task::spawn_blocking(move || {
+                            let engine = state_fb.engine.lock().unwrap();
+                            state_fb.message_store.poll(engine.graph(), &agent_id_fb, 0, 100, false)
+                        })
+                        .await
+                        .unwrap_or(Ok(Vec::new()))
+                        .unwrap_or_default();
+
+                        for msg in &replay {
+                            let event = serde_json::json!({"event": "message", "data": msg});
+                            if socket.send(Message::Text(event.to_string().into())).await.is_err() {
+                                state.ws_registry.unregister(&agent_id);
+                                return;
+                            }
+                        }
+
                         rx = state.ws_registry.register(&agent_id);
                     }
                     Err(_) => break, // channel closed
