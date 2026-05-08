@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.2.0 — 2026-05-08
+
+Hardening release — reliability, observability, and auditability.
+
+### Async Safety (Phase 1)
+
+- All `engine.lock().unwrap()` calls moved inside `tokio::task::spawn_blocking`
+- Removed synchronous `with_graph` helper — all DB access is now non-blocking
+- Prevents tokio worker thread starvation under concurrent load
+
+### Input Validation & Caps (Phase 2)
+
+- Body size cap: 1 MB max per text part
+- Self-messaging rejection: `POST /messages` returns 422 if `from == to`
+- Negative limit rejection: poll queries with `limit < 0` are clamped to 0
+- Subscribe endpoint: verifies agent exists before creating subscription
+
+### Graceful Shutdown (Phase 3)
+
+- Signal handler for `SIGINT`/`SIGTERM`
+- Drain in-flight requests before exiting
+- Background tasks (nudge loop, CI monitor, doc monitor) get shutdown signal
+
+### Circuit Breaker + TTL Eviction (Phase 4)
+
+- `CircuitBreaker`: per-agent failure tracking with `Closed`/`Open`/`HalfOpen` states
+- Configurable: `failure_threshold` (default 5), `cooldown_seconds` (default 60)
+- `evict_stale()`: removes circuit entries for agents offline >24h
+- `purge_offline()`: removes agents with no heartbeat >24h
+
+### Async Process Commands (Phase 5)
+
+- Replaced `std::process::Command` with `tokio::process::Command`
+- All external process execution is now non-blocking
+
+### Rate Limiting (C3)
+
+- Per-IP rate limiting via `tower-governor`
+- Default: 1000 req/s burst, 5000 req/s sustained
+- `build_router_unlimited` for test environments
+
+### Notification Delivery Tracking
+
+- Failed WS pushes now store notifications as pending messages
+- `MessageStore::store_notification()` for system-originated messages
+- Offline agents receive stored notifications on poll/reconnect
+
+### Audit Logging
+
+- `AuditStore`: lightweight wrapper around `EventBus` for audit records
+- Reserved project: `_envoy_audit`
+- Operations tracked: `agent_registered`, `agent_disconnected`, `message_sent`,
+  `event_ingested`, `circuit_opened`, `circuit_closed`
+- `GET /audit?agent_id=&operation=&since=&limit=` for querying audit trail
+
+### CI/CD
+
+- GitHub Actions: 4 parallel jobs (fmt+clippy, tests, e2e, semgrep)
+- Semgrep OSS: `p/rust` + custom rules (no-unwrap, no-todo)
+- MSRV: Rust 1.95.0 (required for stable AVX512 in sqlitegraph)
+
 ## 0.1.0 — 2026-05-05
 
 Initial MVP release.
