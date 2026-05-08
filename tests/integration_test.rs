@@ -1293,3 +1293,143 @@ async fn agent_registration_is_audited() {
     assert!(!events.is_empty(), "agent registration should be audited");
     assert_eq!(events[0]["source"], "agent_registered");
 }
+
+#[tokio::test]
+async fn message_send_is_audited() {
+    let app = test_app();
+
+    // Register two agents
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"sender","kind":"claude"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let sender: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    let sender_id = sender["agent_id"].as_str().unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"receiver","kind":"claude"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let receiver: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+            .unwrap();
+    let receiver_id = receiver["agent_id"].as_str().unwrap();
+
+    // Send a message
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"type":"direct","from":"{sender_id}","to":"{receiver_id}","parts":[{{"text":"hello"}}]}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Query audit log for message sent
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/audit?agent_id={sender_id}&operation=message_sent"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let audit_body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 8192).await.unwrap())
+            .unwrap();
+
+    let events = audit_body["events"].as_array().unwrap();
+    assert!(!events.is_empty(), "message send should be audited");
+    assert_eq!(events[0]["source"], "message_sent");
+}
+
+#[tokio::test]
+async fn event_ingestion_is_audited() {
+    let app = test_app();
+
+    // Register an agent
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"event-agent","kind":"claude"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Ingest an event
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/events/hook")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"project":"test","hook_name":"verify","exit_code":0,"output":"ok"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Query audit log for event ingestion
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/audit?operation=event_ingested")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let audit_body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 8192).await.unwrap())
+            .unwrap();
+
+    let events = audit_body["events"].as_array().unwrap();
+    assert!(!events.is_empty(), "event ingestion should be audited");
+    assert_eq!(events[0]["source"], "event_ingested");
+}

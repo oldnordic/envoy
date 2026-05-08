@@ -563,8 +563,32 @@ async fn send_message(
                 .send_json(&recipient, "message", &event_data);
             if delivered {
                 state.circuit_breaker.record_success(&recipient);
+                let state_fb = state.clone();
+                let recipient_fb = recipient.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let engine = state_fb.engine.lock().unwrap();
+                    state_fb
+                        .audit_store
+                        .log_circuit_closed(engine.graph(), &recipient_fb)
+                })
+                .await;
             } else {
                 state.circuit_breaker.record_failure(&recipient);
+                let status = state.circuit_breaker.get_state(&recipient);
+                if status.state == "open" {
+                    let state_fb = state.clone();
+                    let recipient_fb = recipient.clone();
+                    let failures = status.failures;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let engine = state_fb.engine.lock().unwrap();
+                        state_fb.audit_store.log_circuit_opened(
+                            engine.graph(),
+                            &recipient_fb,
+                            failures,
+                        )
+                    })
+                    .await;
+                }
             }
         }
         circuit::CanDeliver::No => {
@@ -859,7 +883,7 @@ async fn ingest_hook_event(
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb.event_bus.ingest(
+        let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
             EventType::HookResult,
@@ -871,7 +895,14 @@ async fn ingest_hook_event(
                 "exit_code": req.exit_code,
                 "output_preview": req.output.chars().take(200).collect::<String>(),
             }),
-        )
+        )?;
+        let _ = state_fb.audit_store.log_event_ingested(
+            engine.graph(),
+            &req.project,
+            &format!("hook:{}", req.hook_name),
+            EventType::HookResult,
+        );
+        Ok::<_, crate::error::EnvoyError>(event)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
@@ -897,7 +928,7 @@ async fn ingest_gate_event(
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb.event_bus.ingest(
+        let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
             EventType::GateResult,
@@ -909,7 +940,14 @@ async fn ingest_gate_event(
                 "gates_total": req.gates_total,
                 "failures": req.failures,
             }),
-        )
+        )?;
+        let _ = state_fb.audit_store.log_event_ingested(
+            engine.graph(),
+            &req.project,
+            "gate:quality",
+            EventType::GateResult,
+        );
+        Ok::<_, crate::error::EnvoyError>(event)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
@@ -935,7 +973,7 @@ async fn ingest_ci_event(
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb.event_bus.ingest(
+        let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
             EventType::CiStatus,
@@ -953,7 +991,14 @@ async fn ingest_ci_event(
                 "head_branch": req.head_branch,
                 "display_title": req.display_title,
             }),
-        )
+        )?;
+        let _ = state_fb.audit_store.log_event_ingested(
+            engine.graph(),
+            &req.project,
+            "ci:github",
+            EventType::CiStatus,
+        );
+        Ok::<_, crate::error::EnvoyError>(event)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
@@ -979,7 +1024,7 @@ async fn ingest_doc_event(
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb.event_bus.ingest(
+        let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
             EventType::DocSync,
@@ -990,7 +1035,14 @@ async fn ingest_doc_event(
                 "doc_files": req.doc_files,
                 "last_updated_seconds": req.last_updated_seconds,
             }),
-        )
+        )?;
+        let _ = state_fb.audit_store.log_event_ingested(
+            engine.graph(),
+            &req.project,
+            "doc:wiki",
+            EventType::DocSync,
+        );
+        Ok::<_, crate::error::EnvoyError>(event)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
@@ -1016,7 +1068,7 @@ async fn ingest_verify_event(
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
         let engine = state_fb.engine.lock().unwrap();
-        state_fb.event_bus.ingest(
+        let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
             EventType::TaskVerify,
@@ -1036,7 +1088,14 @@ async fn ingest_verify_event(
                 "failed": req.failed,
                 "failures": req.failures,
             }),
-        )
+        )?;
+        let _ = state_fb.audit_store.log_event_ingested(
+            engine.graph(),
+            &req.project,
+            &format!("verify:{}", req.task_type),
+            EventType::TaskVerify,
+        );
+        Ok::<_, crate::error::EnvoyError>(event)
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
@@ -1649,11 +1708,33 @@ async fn broadcast_to_project(
         let delivered = state.ws_registry.send_json(agent_id, event_type, data);
         if delivered {
             state.circuit_breaker.record_success(agent_id);
+            let state_fb = state.clone();
+            let agent_id_fb = agent_id.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let engine = state_fb.engine.lock().unwrap();
+                state_fb
+                    .audit_store
+                    .log_circuit_closed(engine.graph(), &agent_id_fb)
+            })
+            .await;
             if let Some(eid) = event_id {
                 delivery_pairs.push((agent_id.clone(), eid.to_string()));
             }
         } else {
             state.circuit_breaker.record_failure(agent_id);
+            let status = state.circuit_breaker.get_state(agent_id);
+            if status.state == "open" {
+                let state_fb = state.clone();
+                let agent_id_fb = agent_id.clone();
+                let failures = status.failures;
+                let _ = tokio::task::spawn_blocking(move || {
+                    let engine = state_fb.engine.lock().unwrap();
+                    state_fb
+                        .audit_store
+                        .log_circuit_opened(engine.graph(), &agent_id_fb, failures)
+                })
+                .await;
+            }
             offline_agents.push(agent_id.clone());
         }
     }
