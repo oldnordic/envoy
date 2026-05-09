@@ -9,8 +9,16 @@ use crate::monitor::{ci, doc};
 /// Run the envoy server. Opens (or creates) the database at `db_path`
 /// and starts the HTTP server on `addr`.
 pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
+    run_with_atheneum(db_path, addr, None).await
+}
+
+/// Run the envoy server with atheneum integration enabled.
+pub async fn run_with_atheneum(db_path: &str, addr: SocketAddr, atheneum_path: Option<String>) -> Result<()> {
     let engine = Engine::open(db_path)?;
-    let state = Arc::new(AppState::new(engine)?);
+    let state = Arc::new(
+        AppState::new(engine)?
+            .with_atheneum(atheneum_path)
+    );
 
     // Spawn background nudge loop
     let nudge_state = state.clone();

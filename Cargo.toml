@@ -23,6 +23,7 @@ tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
+atheneum = { path = "../atheneum", optional = true }
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -35,7 +36,7 @@ atheneum = { path = "../atheneum" }
 
 [features]
 default = []
-atheneum = []
+atheneum = ["dep:atheneum"]
 
 [[bin]]
 name = "envoy"

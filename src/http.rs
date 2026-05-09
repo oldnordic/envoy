@@ -5,7 +5,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
-use axum::{routing::get, Json, Router};
+use axum::{routing::{get, post}, Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -87,6 +87,8 @@ pub struct AppState {
     pub rate_limiter: HybridRateLimiter,
     pub nudge_config: Mutex<NudgeConfig>,
     pub start_time: chrono::DateTime<chrono::Utc>,
+    #[cfg(feature = "atheneum")]
+    pub atheneum_path: Option<String>,
 }
 
 impl AppState {
@@ -113,7 +115,15 @@ impl AppState {
             rate_limiter,
             nudge_config: Mutex::new(NudgeConfig::default()),
             start_time: chrono::Utc::now(),
+            #[cfg(feature = "atheneum")]
+            atheneum_path: None,
         })
+    }
+
+    #[cfg(feature = "atheneum")]
+    pub fn with_atheneum(mut self, path: Option<String>) -> Self {
+        self.atheneum_path = path;
+        self
     }
 
     /// Async version of with_graph — offloads DB work to the blocking thread pool.
@@ -254,6 +264,217 @@ pub async fn rate_limit_middleware(
     next.run(request).await
 }
 
+// ── Atheneum Handlers (cfg-gated) ──
+
+#[cfg(feature = "atheneum")]
+pub async fn store_discovery(
+    State(state): State<SharedState>,
+    Json(req): Json<StoreDiscoveryRequest>,
+) -> Result<(axum::http::StatusCode, Json<StoreDiscoveryResponse>)> {
+    let atheneum_path = state
+        .atheneum_path
+        .as_ref()
+        .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))?
+        .clone();
+    let agent = req.agent.clone();
+    let discovery_type = req.discovery_type.clone();
+    let target = req.target.clone();
+    let metadata = req.metadata.clone();
+
+    let discovery_id = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.store_discovery(&agent, &discovery_type, &target, metadata)
+    })
+    .await
+    .map_err(|e| EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(StoreDiscoveryResponse {
+            discovery_id,
+            agent: req.agent,
+            target: req.target,
+            discovery_type: req.discovery_type,
+        }),
+    ))
+}
+
+#[cfg(feature = "atheneum")]
+pub async fn get_discoveries(
+    State(state): State<SharedState>,
+    Query(query): Query<DiscoveriesQuery>,
+) -> Result<Json<DiscoveriesResponse>> {
+    let atheneum_path = state
+        .atheneum_path
+        .as_ref()
+        .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))?
+        .clone();
+    let target = query.target.clone();
+
+    let discoveries = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.query_discoveries(&target)
+    })
+    .await
+    .map_err(|e| EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    let discovery_count = discoveries.len();
+    let discoveries: Vec<DiscoveryData> = discoveries
+        .into_iter()
+        .map(|d| DiscoveryData {
+            id: d.id,
+            name: d.name,
+            data: d.data,
+        })
+        .collect();
+
+    Ok(Json(DiscoveriesResponse {
+        target: query.target,
+        discovery_count,
+        discoveries,
+    }))
+}
+
+#[cfg(feature = "atheneum")]
+pub async fn store_handoff(
+    State(state): State<SharedState>,
+    Json(req): Json<StoreHandoffRequest>,
+) -> Result<(axum::http::StatusCode, Json<StoreHandoffResponse>)> {
+    let atheneum_path = state
+        .atheneum_path
+        .as_ref()
+        .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))?
+        .clone();
+    let from_agent = req.from_agent.clone();
+    let to_agent = req.to_agent.clone();
+    let manifest = req.manifest.clone();
+
+    let handoff_id = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.store_handoff(&from_agent, &to_agent, manifest)
+    })
+    .await
+    .map_err(|e| EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(StoreHandoffResponse {
+            handoff_id,
+            from_agent: req.from_agent,
+            to_agent: req.to_agent,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }),
+    ))
+}
+
+#[cfg(feature = "atheneum")]
+pub async fn get_pending_handoff(
+    State(state): State<SharedState>,
+    Query(query): Query<PendingHandoffQuery>,
+) -> Result<Json<PendingHandoffResponse>> {
+    let atheneum_path = state
+        .atheneum_path
+        .as_ref()
+        .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))?
+        .clone();
+    let agent = query.agent.clone();
+
+    let handoff = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.get_pending_handoff(&agent)
+    })
+    .await
+    .map_err(|e| EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    let handoff = handoff.map(|h| {
+        let from_agent = h.data["from_agent"].as_str().unwrap_or("").to_string();
+        let to_agent = h.data["to_agent"].as_str().unwrap_or("").to_string();
+        let manifest = h
+            .data
+            .get("manifest")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        HandoffData {
+            id: h.id,
+            name: h.name,
+            from_agent,
+            to_agent,
+            manifest,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    });
+
+    Ok(Json(PendingHandoffResponse { handoff }))
+}
+
+#[cfg(feature = "atheneum")]
+pub async fn claim_handoff(
+    State(state): State<SharedState>,
+    Path(handoff_id): Path<i64>,
+) -> Result<Json<ClaimHandoffResponse>> {
+    let atheneum_path = state
+        .atheneum_path
+        .as_ref()
+        .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))?
+        .clone();
+
+    let claimed = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.mark_handoff_claimed(handoff_id)?;
+        Ok::<bool, anyhow::Error>(true)
+    })
+    .await
+    .map_err(|e| EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok(Json(ClaimHandoffResponse {
+        claimed,
+        handoff_id,
+    }))
+}
+
+#[cfg(feature = "atheneum")]
+pub async fn get_knowledge(
+    State(state): State<SharedState>,
+    Query(query): Query<KnowledgeQuery>,
+) -> Result<Json<KnowledgeResponse>> {
+    let atheneum_path = state
+        .atheneum_path
+        .as_ref()
+        .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))?
+        .clone();
+    let target = query.target.clone();
+
+    let knowledge = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.query_knowledge(&target)
+    })
+    .await
+    .map_err(|e| EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    let discovery_count = knowledge["discovery_count"].as_u64().unwrap_or(0) as usize;
+    let total = knowledge["token_savings"]["total"].as_u64().unwrap_or(0) as usize;
+    let mut by_type = std::collections::HashMap::new();
+    if let Some(obj) = knowledge["token_savings"]["by_type"].as_object() {
+        for (k, v) in obj {
+            if let Some(count) = v.as_u64() {
+                by_type.insert(k.clone(), count as usize);
+            }
+        }
+    }
+
+    Ok(Json(KnowledgeResponse {
+        target: query.target,
+        discovery_count,
+        token_savings: TokenSavings { total, by_type },
+    }))
+}
+
 /// Build the base envoy HTTP routes (without state).
 fn build_base_routes() -> Router<SharedState> {
     Router::new()
@@ -316,6 +537,21 @@ fn build_base_routes() -> Router<SharedState> {
             get(get_project_config).post(set_project_config),
         )
         .route("/ws/{agent_id}", get(ws_handler))
+        // Atheneum routes (cfg-gated)
+        .route(
+            "/atheneum/discoveries",
+            post(store_discovery).get(get_discoveries),
+        )
+        .route("/atheneum/handoffs", post(store_handoff))
+        .route(
+            "/atheneum/handoffs/pending",
+            get(get_pending_handoff),
+        )
+        .route(
+            "/atheneum/handoffs/{id}/claim",
+            post(claim_handoff),
+        )
+        .route("/atheneum/knowledge", get(get_knowledge))
 }
 
 /// Build the envoy HTTP router with rate limiting.
@@ -396,6 +632,117 @@ struct CreateDependencyRequest {
     dependent_agent: String,
     blocker_agent: String,
     reason: String,
+}
+
+// ── Atheneum Integration (cfg-gated) ──
+// These types and handlers are only available when atheneum feature is enabled.
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Deserialize)]
+pub struct StoreDiscoveryRequest {
+    pub agent: String,
+    pub discovery_type: String,
+    pub target: String,
+    pub metadata: serde_json::Value,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct StoreDiscoveryResponse {
+    pub discovery_id: i64,
+    pub agent: String,
+    pub target: String,
+    pub discovery_type: String,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Deserialize)]
+pub struct DiscoveriesQuery {
+    pub target: String,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct DiscoveriesResponse {
+    pub target: String,
+    pub discovery_count: usize,
+    pub discoveries: Vec<DiscoveryData>,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct DiscoveryData {
+    pub id: i64,
+    pub name: String,
+    pub data: serde_json::Value,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Deserialize)]
+pub struct StoreHandoffRequest {
+    pub from_agent: String,
+    pub to_agent: String,
+    pub manifest: serde_json::Value,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct StoreHandoffResponse {
+    pub handoff_id: i64,
+    pub from_agent: String,
+    pub to_agent: String,
+    pub created_at: String,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Deserialize)]
+pub struct PendingHandoffQuery {
+    pub agent: String,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct PendingHandoffResponse {
+    pub handoff: Option<HandoffData>,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct HandoffData {
+    pub id: i64,
+    pub name: String,
+    pub from_agent: String,
+    pub to_agent: String,
+    pub manifest: serde_json::Value,
+    pub created_at: String,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct ClaimHandoffResponse {
+    pub claimed: bool,
+    pub handoff_id: i64,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Deserialize)]
+pub struct KnowledgeQuery {
+    pub target: String,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct KnowledgeResponse {
+    pub target: String,
+    pub discovery_count: usize,
+    pub token_savings: TokenSavings,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct TokenSavings {
+    pub total: usize,
+    pub by_type: std::collections::HashMap<String, usize>,
 }
 
 // ── Handlers ──
@@ -492,6 +839,48 @@ async fn pending_messages(
     })))
 }
 
+// ============================================================================
+// Atheneum Auto-Persistence Helpers (cfg-gated)
+// ============================================================================
+
+/// Extract HandoffData from message parts if present
+#[cfg(feature = "atheneum")]
+fn extract_handoff_data(parts: &[crate::message::Part]) -> Option<crate::message::HandoffData> {
+    use crate::message::PartContent;
+
+    for part in parts {
+        if let PartContent::Data(ref data) = part.content {
+            if let Ok(handoff) = serde_json::from_value::<crate::message::HandoffData>(data.clone())
+            {
+                return Some(handoff);
+            }
+        }
+    }
+    None
+}
+
+/// Store a handoff to atheneum (async, non-blocking)
+#[cfg(feature = "atheneum")]
+async fn store_handoff_to_atheneum(
+    atheneum_path: String,
+    from: String,
+    to: String,
+    manifest: serde_json::Value,
+) {
+    tokio::task::spawn_blocking(move || {
+        match atheneum::graph::AtheneumGraph::open(std::path::Path::new(&atheneum_path)) {
+            Ok(atheneum) => {
+                if let Err(e) = atheneum.store_handoff(&from, &to, manifest) {
+                    eprintln!("Failed to store handoff in atheneum: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Failed to open atheneum at {}: {}", atheneum_path, e),
+        }
+    })
+    .await
+    .ok(); // Fire-and-forget - errors are already logged
+}
+
 async fn send_message(
     State(state): State<SharedState>,
     Json(req): Json<SendMessageRequest>,
@@ -537,6 +926,25 @@ async fn send_message(
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
+
+    // Auto-persist handoffs to atheneum (non-blocking, fire-and-forget)
+    #[cfg(feature = "atheneum")]
+    if stored.msg_type == MessageType::Handoff {
+        if let Some(ref atheneum_path) = state.atheneum_path {
+            let atheneum_path = atheneum_path.clone();
+            let from = stored.from.clone();
+            let to = stored.to.clone();
+            let parts = stored.parts.clone();
+
+            // Spawn background task - failures don't affect message delivery
+            tokio::spawn(async move {
+                if let Some(handoff_data) = extract_handoff_data(&parts) {
+                    let manifest = serde_json::to_value(&handoff_data).unwrap_or_default();
+                    store_handoff_to_atheneum(atheneum_path, from, to, manifest).await;
+                }
+            });
+        }
+    }
 
     // Push to recipient via WebSocket if connected (in-memory)
     let event_data = serde_json::to_value(&stored).unwrap_or_default();
