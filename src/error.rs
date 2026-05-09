@@ -7,6 +7,9 @@ pub enum EnvoyError {
     #[error("graph error: {0}")]
     Graph(#[from] sqlitegraph::SqliteGraphError),
 
+    #[error("atheneum error: {0}")]
+    Atheneum(#[from] anyhow::Error),
+
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 

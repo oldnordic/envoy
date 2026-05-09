@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
+use crate::atheneum_bridge;
 use crate::circuit;
 use crate::dependency::DependencyStore;
 use crate::engine::Engine;
@@ -87,10 +88,16 @@ pub struct AppState {
     pub rate_limiter: HybridRateLimiter,
     pub nudge_config: Mutex<NudgeConfig>,
     pub start_time: chrono::DateTime<chrono::Utc>,
+    /// Path to the atheneum database for agent knowledge sharing
+    pub atheneum_path: String,
 }
 
 impl AppState {
     pub fn new(engine: Engine) -> Result<Self> {
+        Self::with_atheneum_path(engine, ".magellan/atheneum.db")
+    }
+
+    pub fn with_atheneum_path(engine: Engine, atheneum_path: &str) -> Result<Self> {
         let agent_registry = AgentRegistry::new(engine.graph())?;
         let rate_limiter = HybridRateLimiter::new(
             engine.graph(),
@@ -113,6 +120,7 @@ impl AppState {
             rate_limiter,
             nudge_config: Mutex::new(NudgeConfig::default()),
             start_time: chrono::Utc::now(),
+            atheneum_path: atheneum_path.to_string(),
         })
     }
 
@@ -254,8 +262,8 @@ pub async fn rate_limit_middleware(
     next.run(request).await
 }
 
-/// Build the envoy HTTP router with rate limiting.
-pub fn build_router(state: SharedState) -> Router {
+/// Build the base envoy HTTP routes (without state).
+fn build_base_routes() -> Router<SharedState> {
     Router::new()
         .route("/agents", get(list_agents).post(register_agent))
         .route(
@@ -316,6 +324,22 @@ pub fn build_router(state: SharedState) -> Router {
             get(get_project_config).post(set_project_config),
         )
         .route("/ws/{agent_id}", get(ws_handler))
+}
+
+/// Build the envoy HTTP router with rate limiting.
+pub fn build_router(state: SharedState) -> Router {
+    build_base_routes()
+        .with_state(state.clone())
+        .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            rate_limit_middleware,
+        ))
+}
+
+/// Build the envoy HTTP router with atheneum routes (uses rate limiting).
+pub fn build_router_with_atheneum(state: SharedState) -> Router {
+    atheneum_bridge::add_atheneum_routes(build_base_routes())
         .with_state(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
         .layer(axum::middleware::from_fn_with_state(
@@ -326,67 +350,12 @@ pub fn build_router(state: SharedState) -> Router {
 
 /// Build the router without rate limiting (for tests).
 pub fn build_router_unlimited(state: SharedState) -> Router {
-    Router::new()
-        .route("/agents", get(list_agents).post(register_agent))
-        .route(
-            "/agents/{agent_id}",
-            get(get_agent).delete(disconnect_agent),
-        )
-        .route("/agents/{agent_id}/messages/pending", get(pending_messages))
-        .route("/messages", get(poll_messages).post(send_message))
-        .route("/messages/{message_id}", get(get_message))
-        .route(
-            "/messages/{message_id}/ack",
-            axum::routing::post(ack_message),
-        )
-        .route("/agents/{agent_id}/circuit", get(get_circuit))
-        .route(
-            "/agents/{agent_id}/circuit/failure",
-            axum::routing::post(record_circuit_failure),
-        )
-        .route("/health", get(health))
-        .route("/stats", get(stats))
-        .route("/heartbeat", axum::routing::post(heartbeat))
-        .route("/dependencies", axum::routing::post(create_dependency))
-        .route("/dependencies/blocker/{agent_id}", get(get_blocker_deps))
-        .route(
-            "/dependencies/dependent/{agent_id}",
-            get(get_dependent_deps),
-        )
-        .route(
-            "/dependencies/{dep_id}/resolve",
-            axum::routing::post(resolve_dependency),
-        )
-        .route(
-            "/nudge-config",
-            get(get_nudge_config).post(update_nudge_config),
-        )
-        .route("/events/hook", axum::routing::post(ingest_hook_event))
-        .route("/events/gate", axum::routing::post(ingest_gate_event))
-        .route("/events/ci", axum::routing::post(ingest_ci_event))
-        .route("/events/doc", axum::routing::post(ingest_doc_event))
-        .route("/events/verify", axum::routing::post(ingest_verify_event))
-        .route("/events", get(query_events))
-        .route("/audit", get(query_audit))
-        .route("/tasks/propose", axum::routing::post(propose_task))
-        .route("/tasks/claim-next", axum::routing::post(claim_next_task))
-        .route("/tasks/{id}/claim", axum::routing::post(claim_task))
-        .route("/tasks/{id}/state", axum::routing::post(update_task_state))
-        .route("/tasks/{id}/audit", get(query_task_audit))
-        .route("/tasks/{id}", get(get_task))
-        .route("/tasks", get(list_tasks))
-        .route("/subscriptions", axum::routing::post(subscribe_agent))
-        .route(
-            "/subscriptions/{agent_id}/{project}",
-            axum::routing::delete(unsubscribe_agent),
-        )
-        .route("/subscriptions/{agent_id}", get(list_subscriptions))
-        .route(
-            "/projects/{name}/config",
-            get(get_project_config).post(set_project_config),
-        )
-        .route("/ws/{agent_id}", get(ws_handler))
-        .with_state(state)
+    build_base_routes().with_state(state)
+}
+
+/// Build the router with atheneum routes without rate limiting (for tests).
+pub fn build_router_unlimited_with_atheneum(state: SharedState) -> Router {
+    atheneum_bridge::add_atheneum_routes(build_base_routes()).with_state(state)
 }
 
 // ── Request/Response types ──
