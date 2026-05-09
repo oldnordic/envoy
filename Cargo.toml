@@ -24,9 +24,9 @@ ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
 # Atheneum is a local dependency - patched via .cargo/config.toml
-# In CI, this dependency is unused (feature-gated)
-# Version is a placeholder since we patch it locally
-atheneum = { version = "0.1", optional = true }
+# Using git dependency as fallback (same repo, different path for now)
+# TODO: Publish atheneum to crates.io or use private registry
+atheneum = { git = "https://github.com/oldnordic/atheneum", branch = "main", optional = true }
 
 
 [dev-dependencies]
