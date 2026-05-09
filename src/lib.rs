@@ -39,8 +39,8 @@ pub use message::{
 
 // Rate limit types
 pub use rate_limit::{
-    HybridRateLimiter, HybridRateLimiterStats, RateLimitConfig, RateLimitDecision,
-    RateLimitState, RateLimitStore, TokenBucket,
+    HybridRateLimiter, HybridRateLimiterStats, RateLimitConfig, RateLimitDecision, RateLimitState,
+    RateLimitStore, TokenBucket,
 };
 
 pub use error::EnvoyError;

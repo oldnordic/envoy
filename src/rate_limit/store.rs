@@ -23,11 +23,7 @@ impl RateLimitStore {
     }
 
     /// Persist rate limit state to sqlitegraph.
-    pub fn persist(
-        &self,
-        graph: &sqlitegraph::SqliteGraph,
-        state: &RateLimitState,
-    ) -> Result<()> {
+    pub fn persist(&self, graph: &sqlitegraph::SqliteGraph, state: &RateLimitState) -> Result<()> {
         use sqlitegraph::GraphEntity;
 
         let data = serde_json::json!({
@@ -62,9 +58,7 @@ impl RateLimitStore {
     ) -> Result<Option<RateLimitState>> {
         use crate::rate_limit::TokenBucket;
 
-        if let Some(entity) =
-            graph.find_entity_by_kind_and_name(KIND_RATE_LIMIT, agent_id)?
-        {
+        if let Some(entity) = graph.find_entity_by_kind_and_name(KIND_RATE_LIMIT, agent_id)? {
             let tokens = entity
                 .data
                 .get("tokens")
@@ -97,10 +91,7 @@ impl RateLimitStore {
     }
 
     /// Load all rate limit states from sqlitegraph.
-    pub fn load_all(
-        &self,
-        graph: &sqlitegraph::SqliteGraph,
-    ) -> Result<Vec<RateLimitState>> {
+    pub fn load_all(&self, graph: &sqlitegraph::SqliteGraph) -> Result<Vec<RateLimitState>> {
         let entities = graph.find_entities_by_kind(KIND_RATE_LIMIT)?;
         let mut states = Vec::new();
 
@@ -147,9 +138,7 @@ impl RateLimitStore {
 
     /// Remove a ban from sqlitegraph.
     pub fn remove_ban(&self, graph: &sqlitegraph::SqliteGraph, agent_id: &str) -> Result<()> {
-        if let Some(entity) =
-            graph.find_entity_by_kind_and_name(KIND_RATE_LIMIT_BAN, agent_id)?
-        {
+        if let Some(entity) = graph.find_entity_by_kind_and_name(KIND_RATE_LIMIT_BAN, agent_id)? {
             graph.delete_entity(entity.id)?;
         }
         Ok(())

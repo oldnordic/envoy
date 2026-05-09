@@ -85,9 +85,8 @@ impl RateLimitState {
             }
         } else {
             let deficit = cost - self.bucket.tokens;
-            let retry_after = Duration::from_secs_f64(
-                deficit as f64 / self.bucket.replenish_rate as f64,
-            );
+            let retry_after =
+                Duration::from_secs_f64(deficit as f64 / self.bucket.replenish_rate as f64);
             RateLimitDecision {
                 allowed: false,
                 retry_after: Some(retry_after),

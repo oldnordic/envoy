@@ -174,11 +174,7 @@ impl HybridRateLimiter {
     }
 
     /// Evict the least-recently-used entry from L1, flushing to L2.
-    fn evict_lru(
-        &self,
-        graph: &sqlitegraph::SqliteGraph,
-        l1: &mut AHashMap<String, L1Entry>,
-    ) {
+    fn evict_lru(&self, graph: &sqlitegraph::SqliteGraph, l1: &mut AHashMap<String, L1Entry>) {
         let lru_key = l1
             .iter()
             .min_by_key(|(_, v)| v.last_accessed)

@@ -4,13 +4,8 @@ use std::sync::{Arc, Mutex};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use axum::{routing::get, Json, Router};
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 

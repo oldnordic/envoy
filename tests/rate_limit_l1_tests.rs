@@ -113,7 +113,9 @@ fn test_ban_agent() {
     let limiter = HybridRateLimiter::new(&graph, config, 100).unwrap();
 
     // When: Ban an agent
-    limiter.ban_agent(&graph, "malicious-agent", "spamming").unwrap();
+    limiter
+        .ban_agent(&graph, "malicious-agent", "spamming")
+        .unwrap();
 
     // Then: All requests should be blocked
     let decision = limiter.check_rate_limit(&graph, "malicious-agent");

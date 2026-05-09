@@ -1,7 +1,7 @@
 //! Rate limit store tests — sqlitegraph persistence.
 //! Tests written FIRST (TDD), will fail until full implementation exists.
 
-use envoy::rate_limit::{RateLimitStore, RateLimitState};
+use envoy::rate_limit::{RateLimitState, RateLimitStore};
 
 #[test]
 fn test_persist_rate_limit() {
@@ -29,9 +29,15 @@ fn test_load_all_on_startup() {
     let graph = sqlitegraph::SqliteGraph::open_in_memory().unwrap();
     let store = RateLimitStore::new();
 
-    store.persist(&graph, &RateLimitState::new("agent1", 100, 10)).unwrap();
-    store.persist(&graph, &RateLimitState::new("agent2", 200, 20)).unwrap();
-    store.persist(&graph, &RateLimitState::new("agent3", 300, 30)).unwrap();
+    store
+        .persist(&graph, &RateLimitState::new("agent1", 100, 10))
+        .unwrap();
+    store
+        .persist(&graph, &RateLimitState::new("agent2", 200, 20))
+        .unwrap();
+    store
+        .persist(&graph, &RateLimitState::new("agent3", 300, 30))
+        .unwrap();
 
     // When: Load all states
     let states = store.load_all(&graph).unwrap();
@@ -98,7 +104,9 @@ fn test_entity_kind_is_correct() {
     let graph = sqlitegraph::SqliteGraph::open_in_memory().unwrap();
     let store = RateLimitStore::new();
 
-    store.persist(&graph, &RateLimitState::new("test-agent", 100, 10)).unwrap();
+    store
+        .persist(&graph, &RateLimitState::new("test-agent", 100, 10))
+        .unwrap();
 
     // When: Query entities by kind
     let entities = graph.find_entities_by_kind("EnvoyRateLimit").unwrap();
