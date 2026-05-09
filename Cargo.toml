@@ -31,7 +31,6 @@ tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.26"
 tempfile = "3"
 http-body-util = "0.1"
-# NOTE: For local dev only. CI requires atheneum to be public or this commented out
 atheneum = { path = "../atheneum" }
 
 [features]
