@@ -16,10 +16,13 @@ pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
 pub async fn run_with_atheneum(
     db_path: &str,
     addr: SocketAddr,
-    atheneum_path: Option<String>,
+    #[allow(unused_variables)] atheneum_path: Option<String>,
 ) -> Result<()> {
     let engine = Engine::open(db_path)?;
+    #[cfg(feature = "atheneum")]
     let state = Arc::new(AppState::new(engine)?.with_atheneum(atheneum_path));
+    #[cfg(not(feature = "atheneum"))]
+    let state = Arc::new(AppState::new(engine)?);
 
     // Spawn background nudge loop
     let nudge_state = state.clone();

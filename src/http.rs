@@ -4,11 +4,10 @@ use std::sync::{Arc, Mutex};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
+#[cfg(feature = "atheneum")]
+use axum::routing::post;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
-use axum::{
-    routing::{get, post},
-    Json, Router,
-};
+use axum::{routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -540,20 +539,26 @@ fn build_base_routes() -> Router<SharedState> {
             get(get_project_config).post(set_project_config),
         )
         .route("/ws/{agent_id}", get(ws_handler))
-        // Atheneum routes (cfg-gated)
-        .route(
-            "/atheneum/discoveries",
-            post(store_discovery).get(get_discoveries),
-        )
-        .route("/atheneum/handoffs", post(store_handoff))
-        .route("/atheneum/handoffs/pending", get(get_pending_handoff))
-        .route("/atheneum/handoffs/{id}/claim", post(claim_handoff))
-        .route("/atheneum/knowledge", get(get_knowledge))
+}
+
+#[cfg(feature = "atheneum")]
+fn add_atheneum_routes(self) -> Self {
+    self.route(
+        "/atheneum/discoveries",
+        post(store_discovery).get(get_discoveries),
+    )
+    .route("/atheneum/handoffs", post(store_handoff))
+    .route("/atheneum/handoffs/pending", get(get_pending_handoff))
+    .route("/atheneum/handoffs/{id}/claim", post(claim_handoff))
+    .route("/atheneum/knowledge", get(get_knowledge))
 }
 
 /// Build the envoy HTTP router with rate limiting.
 pub fn build_router(state: SharedState) -> Router {
-    build_base_routes()
+    let routes = build_base_routes();
+    #[cfg(feature = "atheneum")]
+    let routes = routes.add_atheneum_routes();
+    routes
         .with_state(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
         .layer(axum::middleware::from_fn_with_state(
