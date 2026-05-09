@@ -23,8 +23,8 @@ tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
-# Atheneum is optional - only enabled when the local path exists
-atheneum = { path = "../atheneum", optional = true }
+# Atheneum is optional - use git for CI, override with path in local dev via .cargo/config.toml
+atheneum = { git = "https://github.com/oldnordic/atheneum", branch = "main", optional = true }
 
 
 [dev-dependencies]
