@@ -15,6 +15,7 @@ use envoy::engine::Engine;
 // Test state with engine and atheneum path
 #[derive(Clone)]
 pub struct TestState {
+    #[allow(dead_code)]
     pub engine: Arc<std::sync::Mutex<Engine>>,
     pub atheneum_path: String,
 }

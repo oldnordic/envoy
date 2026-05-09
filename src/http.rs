@@ -542,22 +542,23 @@ fn build_base_routes() -> Router<SharedState> {
 }
 
 #[cfg(feature = "atheneum")]
-fn add_atheneum_routes(self) -> Self {
-    self.route(
-        "/atheneum/discoveries",
-        post(store_discovery).get(get_discoveries),
-    )
-    .route("/atheneum/handoffs", post(store_handoff))
-    .route("/atheneum/handoffs/pending", get(get_pending_handoff))
-    .route("/atheneum/handoffs/{id}/claim", post(claim_handoff))
-    .route("/atheneum/knowledge", get(get_knowledge))
+fn add_atheneum_routes(routes: Router<SharedState>) -> Router<SharedState> {
+    routes
+        .route("/atheneum/discoveries", post(store_discovery))
+        .route("/atheneum/discoveries", get(get_discoveries))
+        .route("/atheneum/handoffs", post(store_handoff))
+        .route("/atheneum/handoffs/pending", get(get_pending_handoff))
+        .route("/atheneum/handoffs/{id}/claim", post(claim_handoff))
+        .route("/atheneum/knowledge", get(get_knowledge))
 }
 
 /// Build the envoy HTTP router with rate limiting.
 pub fn build_router(state: SharedState) -> Router {
     let routes = build_base_routes();
+
     #[cfg(feature = "atheneum")]
-    let routes = routes.add_atheneum_routes();
+    let routes = add_atheneum_routes(routes);
+
     routes
         .with_state(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(1_048_576))

@@ -132,7 +132,7 @@ async fn test_get_discoveries() {
 
     assert_eq!(response_json["target"], "http_handler");
     assert_eq!(response_json["discovery_count"], 1);
-    assert!(response_json["discoveries"].as_array().unwrap().len() > 0);
+    assert!(!response_json["discoveries"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -323,7 +323,7 @@ async fn test_claim_handoff() {
         .oneshot(
             axum::http::Request::builder()
                 .method(axum::http::Method::POST)
-                .uri(&format!("/atheneum/handoffs/{}/claim", handoff_id))
+                .uri(format!("/atheneum/handoffs/{}/claim", handoff_id))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
