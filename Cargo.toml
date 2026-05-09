@@ -23,10 +23,6 @@ tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
-# Atheneum is optional - use git dependency for CI, override with local path via .cargo/config.toml
-# In local dev, .cargo/config.toml patches this to use the local path
-atheneum = { git = "https://github.com/oldnordic/atheneum", branch = "main", optional = true }
-
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -35,12 +31,12 @@ tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.26"
 tempfile = "3"
 http-body-util = "0.1"
+# NOTE: For local dev only. CI requires atheneum to be public or this commented out
+atheneum = { path = "../atheneum" }
 
 [features]
 default = []
-# atheneum feature enables the envoy-atheneum bridge
-# CI does not use this feature, so atheneum is not fetched
-atheneum = ["dep:atheneum"]
+atheneum = []
 
 [[bin]]
 name = "envoy"

@@ -10,8 +10,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
-#[cfg(any(test, feature = "atheneum"))]
-use crate::atheneum_bridge;
 use crate::circuit;
 use crate::dependency::DependencyStore;
 use crate::engine::Engine;
@@ -89,16 +87,10 @@ pub struct AppState {
     pub rate_limiter: HybridRateLimiter,
     pub nudge_config: Mutex<NudgeConfig>,
     pub start_time: chrono::DateTime<chrono::Utc>,
-    /// Path to the atheneum database for agent knowledge sharing
-    pub atheneum_path: String,
 }
 
 impl AppState {
     pub fn new(engine: Engine) -> Result<Self> {
-        Self::with_atheneum_path(engine, ".magellan/atheneum.db")
-    }
-
-    pub fn with_atheneum_path(engine: Engine, atheneum_path: &str) -> Result<Self> {
         let agent_registry = AgentRegistry::new(engine.graph())?;
         let rate_limiter = HybridRateLimiter::new(
             engine.graph(),
@@ -121,7 +113,6 @@ impl AppState {
             rate_limiter,
             nudge_config: Mutex::new(NudgeConfig::default()),
             start_time: chrono::Utc::now(),
-            atheneum_path: atheneum_path.to_string(),
         })
     }
 
@@ -338,27 +329,9 @@ pub fn build_router(state: SharedState) -> Router {
         ))
 }
 
-/// Build the envoy HTTP router with atheneum routes (uses rate limiting).
-#[cfg(any(test, feature = "atheneum"))]
-pub fn build_router_with_atheneum(state: SharedState) -> Router {
-    atheneum_bridge::add_atheneum_routes(build_base_routes())
-        .with_state(state.clone())
-        .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
-        .layer(axum::middleware::from_fn_with_state(
-            state,
-            rate_limit_middleware,
-        ))
-}
-
 /// Build the router without rate limiting (for tests).
 pub fn build_router_unlimited(state: SharedState) -> Router {
     build_base_routes().with_state(state)
-}
-
-/// Build the router with atheneum routes without rate limiting (for tests).
-#[cfg(any(test, feature = "atheneum"))]
-pub fn build_router_unlimited_with_atheneum(state: SharedState) -> Router {
-    atheneum_bridge::add_atheneum_routes(build_base_routes()).with_state(state)
 }
 
 // ── Request/Response types ──

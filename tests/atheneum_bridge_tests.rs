@@ -3,13 +3,18 @@
 //!
 //! These tests only run when atheneum is available via dev-dependencies.
 
+#![cfg(feature = "atheneum")]
+
+mod atheneum_bridge_module;
+
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::util::ServiceExt;
 
 use envoy::engine::Engine;
-use envoy::http::AppState;
 use serde_json::json;
+
+use atheneum_bridge_module::TestState;
 
 // Helper to create test router with isolated temporary databases
 // The TempDir must be kept alive for the test duration
@@ -19,23 +24,16 @@ fn setup_test_router() -> (axum::Router, tempfile::TempDir) {
     let atheneum_path = db_dir.path().join("atheneum.db");
     let engine =
         Engine::open(db_path.to_str().expect("Invalid path")).expect("Failed to open engine");
-    let state = Arc::new(
-        AppState::with_atheneum_path(
-            engine,
-            atheneum_path.to_str().expect("Invalid atheneum path"),
-        )
-        .expect("Failed to create app state"),
-    );
-    let router = {
-        #[cfg(feature = "atheneum")]
-        {
-            envoy::http::build_router_unlimited_with_atheneum(state)
-        }
-        #[cfg(not(feature = "atheneum"))]
-        {
-            compile_error!("atheneum feature must be enabled for this test")
-        }
-    };
+
+    let state = Arc::new(TestState {
+        engine: Arc::new(std::sync::Mutex::new(engine)),
+        atheneum_path: atheneum_path
+            .to_str()
+            .expect("Invalid atheneum path")
+            .to_string(),
+    });
+
+    let router = atheneum_bridge_module::build_test_router(state);
     (router, db_dir)
 }
 
