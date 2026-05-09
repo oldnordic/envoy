@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.0 — 2026-05-09
+
+Atheneum integration — cross-agent knowledge sharing and handoff protocol.
+
+### Atheneum HTTP Routes (Phase 4)
+
+- `POST /atheneum/discoveries` — Store discoveries (symbols, CFG findings, patterns)
+- `GET /atheneum/discoveries?target=X` — Query discoveries by symbol
+- `POST /atheneum/handoffs` — Create handoff manifest
+- `GET /atheneum/handoffs/pending` — Get pending handoffs
+- `POST /atheneum/handoffs/{id}/claim` — Claim a handoff
+- `GET /atheneum/knowledge?target=X` — Query atheneum knowledge graph
+- All routes cfg-gated behind `atheneum` feature
+- `ATHENEUM_DB` environment variable for atheneum database path
+
+### MCP Tools
+
+- `envoy_store_discovery` — Store discoveries to atheneum
+- `envoy_query_knowledge` — Query atheneum knowledge
+- `envoy_get_pending_handoff` — Get pending handoffs
+- `envoy_claim_handoff` — Claim a handoff
+
+### Grounded-Coding Skill Integration
+
+- Gate 0: Query atheneum before local graph search
+- Handoff protocol: HTTP-based (replaces `.grounded/handoff.md` files)
+- Store discoveries: Symbol, CFG, issue, pattern findings
+
+### CI/CD
+
+- Fixed cfg-gating for atheneum feature in CI environment
+- Atheneum dependency commented out for CI, feature set to `[]`
+- All checks pass: fmt, clippy, test, e2e
+
 ## 0.2.0 — 2026-05-08
 
 Hardening release — reliability, observability, and auditability.
