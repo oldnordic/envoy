@@ -1,6 +1,8 @@
 //! Tests for Envoy-Atheneum Bridge HTTP endpoints
 //! Tests are written FIRST (TDD) and will fail until implementation is complete.
 
+#![cfg(feature = "atheneum")]
+
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::util::ServiceExt;
@@ -24,7 +26,16 @@ fn setup_test_router() -> (axum::Router, tempfile::TempDir) {
         )
         .expect("Failed to create app state"),
     );
-    let router = envoy::http::build_router_unlimited_with_atheneum(state);
+    let router = {
+        #[cfg(feature = "atheneum")]
+        {
+            envoy::http::build_router_unlimited_with_atheneum(state)
+        }
+        #[cfg(not(feature = "atheneum"))]
+        {
+            compile_error!("atheneum feature must be enabled for this test")
+        }
+    };
     (router, db_dir)
 }
 

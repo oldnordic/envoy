@@ -22,8 +22,10 @@ futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
-atheneum = { path = "../atheneum" }
 hyper = { version = "1.0", features = ["full"] }
+# Atheneum is a local path dependency for agent knowledge sharing
+# Only available when building locally or with the atheneum feature
+atheneum = { path = "../atheneum", optional = true }
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -32,6 +34,10 @@ tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.26"
 tempfile = "3"
 http-body-util = "0.1"
+
+[features]
+default = []
+atheneum = ["dep:atheneum"]
 
 [[bin]]
 name = "envoy"
