@@ -3,6 +3,8 @@
 //! This module is only compiled when atheneum is available via dev-dependencies.
 //! It provides HTTP interface to atheneum's discovery, handoff, and knowledge APIs.
 
+#![cfg(feature = "atheneum")]
+
 use axum::extract::{Path, Query, State};
 use axum::{routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
