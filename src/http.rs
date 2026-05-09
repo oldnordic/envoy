@@ -5,7 +5,10 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
-use axum::{routing::{get, post}, Json, Router};
+use axum::{
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -543,14 +546,8 @@ fn build_base_routes() -> Router<SharedState> {
             post(store_discovery).get(get_discoveries),
         )
         .route("/atheneum/handoffs", post(store_handoff))
-        .route(
-            "/atheneum/handoffs/pending",
-            get(get_pending_handoff),
-        )
-        .route(
-            "/atheneum/handoffs/{id}/claim",
-            post(claim_handoff),
-        )
+        .route("/atheneum/handoffs/pending", get(get_pending_handoff))
+        .route("/atheneum/handoffs/{id}/claim", post(claim_handoff))
         .route("/atheneum/knowledge", get(get_knowledge))
 }
 

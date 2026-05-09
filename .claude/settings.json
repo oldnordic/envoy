@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/query-schema-check.fish",
-            "statusMessage": "🔍 Verifying database health before subagent starts..."
+            "statusMessage": "\ud83d\udd0d Verifying database health before subagent starts..."
           }
         ]
       }
@@ -17,37 +17,42 @@
           {
             "type": "command",
             "command": ".claude/hooks/ci-check.fish",
-            "statusMessage": "🔄 Checking GitHub CI status after push..."
+            "statusMessage": "\ud83d\udd04 Checking GitHub CI status after push..."
           },
           {
             "type": "command",
             "command": ".claude/hooks/query-symbol-check.fish",
-            "statusMessage": "🔍 Verifying ground truth was queried before coding..."
+            "statusMessage": "\ud83d\udd0d Verifying ground truth was queried before coding..."
           },
           {
             "type": "command",
             "command": ".claude/hooks/verify-rust.fish",
-            "statusMessage": "🦀 Verifying Rust code compiles and graph is updated..."
+            "statusMessage": "\ud83e\udd80 Verifying Rust code compiles and graph is updated..."
           },
           {
             "type": "command",
             "command": ".claude/hooks/splice-cycles-check.fish",
-            "statusMessage": "🔄 Checking for call graph cycles after refactoring..."
+            "statusMessage": "\ud83d\udd04 Checking for call graph cycles after refactoring..."
           },
           {
             "type": "command",
             "command": ".claude/hooks/stub-check.fish",
-            "statusMessage": "🚫 Checking for stub code (panic! in non-test)..."
+            "statusMessage": "\ud83d\udeab Checking for stub code (panic! in non-test)..."
           },
           {
             "type": "command",
             "command": ".claude/hooks/wiring-check.fish",
-            "statusMessage": "🔌 Verifying wiring (dead modules, sqlitegraph integration, debug cleanup)..."
+            "statusMessage": "\ud83d\udd0c Verifying wiring (dead modules, sqlitegraph integration, debug cleanup)..."
           },
           {
             "type": "command",
             "command": ".claude/hooks/security-check.fish",
-            "statusMessage": "🛡️ Checking for security issues in new code..."
+            "statusMessage": "\ud83d\udee1\ufe0f Checking for security issues in new code..."
+          },
+          {
+            "type": "command",
+            "command": "/home/feanor/Projects/.claude/hooks/semgrep-check.fish",
+            "statusMessage": "\ud83d\udd0d Semgrep: unwrap/todo/panic in production code..."
           }
         ]
       }
@@ -58,7 +63,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/logseq-session-hook.fish",
-            "statusMessage": "📓 Logging session to Logseq..."
+            "statusMessage": "\ud83d\udcd3 Logging session to Logseq..."
           }
         ]
       }
