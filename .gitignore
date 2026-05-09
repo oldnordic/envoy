@@ -9,3 +9,4 @@ CLAUDE.md
 .drafts/
 docs/superpowers/
 /config.local.toml
+.cargo/
