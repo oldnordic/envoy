@@ -1,0 +1,13 @@
+{
+  "feature": {
+    "files": ["src/lib.rs"],
+    "min_size": 100
+  },
+  "bugfix": {
+    "files": ["tests/*_test.rs"],
+    "min_size": 50
+  },
+  "plugin": {
+    "files": ["src/http.rs", "src/message/store.rs"]
+  }
+}

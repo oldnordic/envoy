@@ -5,6 +5,12 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::{routing::get, Json, Router};
+use axum::{
+    extract::Request,
+    http::StatusCode,
+    middleware::Next,
+    response::Response,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -17,6 +23,7 @@ use crate::event::bus::{DeliveryTracker, EventBus};
 use crate::event::{self, EventSeverity, EventType};
 use crate::message::{MessageEnvelope, MessageStore, MessageType, Part};
 use crate::monitor::{ProjectConfig, ProjectConfigStore, SubscriptionStore};
+use crate::rate_limit::{HybridRateLimiter, RateLimitConfig};
 use crate::status::NudgeConfig;
 use crate::task::store::TaskStore;
 use crate::task::{self, TaskState};
@@ -82,6 +89,7 @@ pub struct AppState {
     pub circuit_breaker: circuit::CircuitBreaker,
     pub(crate) engine: Arc<Mutex<Engine>>,
     pub(crate) ws_registry: WsRegistry,
+    pub rate_limiter: HybridRateLimiter,
     pub nudge_config: Mutex<NudgeConfig>,
     pub start_time: chrono::DateTime<chrono::Utc>,
 }
@@ -89,6 +97,11 @@ pub struct AppState {
 impl AppState {
     pub fn new(engine: Engine) -> Result<Self> {
         let agent_registry = AgentRegistry::new(engine.graph())?;
+        let rate_limiter = HybridRateLimiter::new(
+            engine.graph(),
+            RateLimitConfig::default(),
+            1000, // L1 capacity
+        )?;
         Ok(Self {
             agent_registry,
             audit_store: crate::audit::AuditStore::new(),
@@ -102,6 +115,7 @@ impl AppState {
             circuit_breaker: circuit::CircuitBreaker::with_defaults(),
             engine: Arc::new(Mutex::new(engine)),
             ws_registry: WsRegistry::new(),
+            rate_limiter,
             nudge_config: Mutex::new(NudgeConfig::default()),
             start_time: chrono::Utc::now(),
         })
@@ -214,15 +228,39 @@ pub async fn run_nudge_loop(state: Arc<AppState>) {
 
 pub type SharedState = Arc<AppState>;
 
+/// Rate limiting middleware using HybridRateLimiter.
+///
+/// Extracts agent ID from X-Agent-Id header (if present), otherwise uses
+/// a fallback identifier. Checks rate limits and returns 429 if exceeded.
+pub async fn rate_limit_middleware(
+    State(state): State<SharedState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Extract agent ID from header or use fallback
+    let agent_id = request
+        .headers()
+        .get("x-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous");
+
+    // Check rate limit (with graph reference)
+    let decision = {
+        let engine = state.engine.lock().unwrap();
+        state
+            .rate_limiter
+            .check_rate_limit(engine.graph(), agent_id)
+    };
+
+    if !decision.allowed {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+
+    next.run(request).await
+}
+
 /// Build the envoy HTTP router with rate limiting.
 pub fn build_router(state: SharedState) -> Router {
-    let governor_config = Arc::new(
-        tower_governor::governor::GovernorConfigBuilder::default()
-            .const_per_second(1000)
-            .const_burst_size(5000)
-            .finish()
-            .unwrap(),
-    );
     Router::new()
         .route("/agents", get(list_agents).post(register_agent))
         .route(
@@ -283,9 +321,12 @@ pub fn build_router(state: SharedState) -> Router {
             get(get_project_config).post(set_project_config),
         )
         .route("/ws/{agent_id}", get(ws_handler))
-        .with_state(state)
+        .with_state(state.clone())
         .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
-        .layer(tower_governor::GovernorLayer::new(governor_config))
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            rate_limit_middleware,
+        ))
 }
 
 /// Build the router without rate limiting (for tests).

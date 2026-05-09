@@ -14,6 +14,7 @@ pub mod event;
 pub mod http;
 pub mod message;
 pub mod monitor;
+pub mod rate_limit;
 pub mod server;
 pub mod status;
 pub mod task;
@@ -34,6 +35,12 @@ pub use message::{
     CompletionStatus, HandoffData, MagellanTracePayload, MessageEnvelope, MessageStore,
     MessageType, Part, PartContent, QualityGateResult, VerificationState, WhatIsStubbed,
     WhatWasDone,
+};
+
+// Rate limit types
+pub use rate_limit::{
+    HybridRateLimiter, HybridRateLimiterStats, RateLimitConfig, RateLimitDecision,
+    RateLimitState, RateLimitStore, TokenBucket,
 };
 
 pub use error::EnvoyError;
