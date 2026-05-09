@@ -23,9 +23,10 @@ tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
-# Atheneum is a local path dependency for agent knowledge sharing
-# Only available when building locally or with the atheneum feature
+# Atheneum is a local path dependency - only available when the feature is enabled
+# CI does not have access to this dependency
 atheneum = { path = "../atheneum", optional = true }
+
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -37,6 +38,8 @@ http-body-util = "0.1"
 
 [features]
 default = []
+# atheneum feature enables the envoy-atheneum bridge
+# Requires local atheneum crate at ../atheneum
 atheneum = ["dep:atheneum"]
 
 [[bin]]
