@@ -5,7 +5,7 @@
 //! agent identity management, and subagent handoff protocol.
 
 pub mod agent;
-#[cfg(feature = "atheneum")]
+#[cfg(any(test, feature = "atheneum"))]
 pub mod atheneum_bridge;
 pub mod audit;
 pub mod circuit;

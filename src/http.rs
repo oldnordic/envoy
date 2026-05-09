@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
-#[cfg(feature = "atheneum")]
+#[cfg(any(test, feature = "atheneum"))]
 use crate::atheneum_bridge;
 use crate::circuit;
 use crate::dependency::DependencyStore;
@@ -339,7 +339,7 @@ pub fn build_router(state: SharedState) -> Router {
 }
 
 /// Build the envoy HTTP router with atheneum routes (uses rate limiting).
-#[cfg(feature = "atheneum")]
+#[cfg(any(test, feature = "atheneum"))]
 pub fn build_router_with_atheneum(state: SharedState) -> Router {
     atheneum_bridge::add_atheneum_routes(build_base_routes())
         .with_state(state.clone())
@@ -356,7 +356,7 @@ pub fn build_router_unlimited(state: SharedState) -> Router {
 }
 
 /// Build the router with atheneum routes without rate limiting (for tests).
-#[cfg(feature = "atheneum")]
+#[cfg(any(test, feature = "atheneum"))]
 pub fn build_router_unlimited_with_atheneum(state: SharedState) -> Router {
     atheneum_bridge::add_atheneum_routes(build_base_routes()).with_state(state)
 }

@@ -1,7 +1,7 @@
 //! Tests for Envoy-Atheneum Bridge HTTP endpoints
 //! Tests are written FIRST (TDD) and will fail until implementation is complete.
-
-#![cfg(feature = "atheneum")]
+//!
+//! These tests only run when atheneum is available via dev-dependencies.
 
 use http_body_util::BodyExt;
 use std::sync::Arc;
