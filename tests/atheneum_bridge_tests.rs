@@ -429,6 +429,14 @@ async fn test_get_knowledge() {
     assert_eq!(response_json["target"], "http_handler");
     assert_eq!(response_json["discovery_count"], 2);
     assert!(response_json["token_savings"].is_object());
+    assert!(
+        response_json["handoff_count"].is_number(),
+        "handoff_count should exist"
+    );
+    assert!(
+        response_json["handoffs"].is_array(),
+        "handoffs should exist"
+    );
 }
 
 #[tokio::test]
