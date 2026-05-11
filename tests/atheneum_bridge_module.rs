@@ -108,14 +108,23 @@ pub struct KnowledgeQuery {
 #[derive(Debug, Serialize)]
 pub struct KnowledgeResponse {
     pub target: String,
+    pub queried_at: String,
+    pub total_entities: i64,
     pub discovery_count: usize,
+    pub discoveries: Vec<DiscoveryData>,
+    pub handoff_count: usize,
+    pub handoffs: Vec<HandoffData>,
     pub token_savings: TokenSavings,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TokenSavings {
-    pub total: usize,
-    pub by_type: std::collections::HashMap<String, usize>,
+    pub unique_agents: i64,
+    pub estimated_file_tokens: i64,
+    pub without_sharing: i64,
+    pub with_sharing: i64,
+    pub saved: i64,
+    pub percentage_reduction: f64,
 }
 
 // ============================================================================
@@ -284,20 +293,71 @@ pub async fn get_knowledge(
 
     // Parse the returned Value into our response structure
     let discovery_count = knowledge["discovery_count"].as_u64().unwrap_or(0) as usize;
-    let total = knowledge["token_savings"]["total"].as_u64().unwrap_or(0) as usize;
-    let mut by_type = std::collections::HashMap::new();
-    if let Some(obj) = knowledge["token_savings"]["by_type"].as_object() {
-        for (k, v) in obj {
-            if let Some(count) = v.as_u64() {
-                by_type.insert(k.clone(), count as usize);
+    let handoff_count = knowledge["handoff_count"].as_u64().unwrap_or(0) as usize;
+    let queried_at = knowledge["queried_at"].as_str().unwrap_or("").to_string();
+    let total_entities = knowledge["total_entities"].as_i64().unwrap_or(0);
+
+    // Parse discoveries
+    let discoveries: Vec<DiscoveryData> = knowledge["discoveries"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|v| DiscoveryData {
+            id: v["id"].as_i64().unwrap_or(0),
+            name: v["name"].as_str().unwrap_or("").to_string(),
+            data: v.clone(),
+        })
+        .collect();
+
+    // Parse handoffs
+    let handoffs: Vec<HandoffData> = knowledge["handoffs"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|v| {
+            let data = v["data"].as_object().cloned().unwrap_or_default();
+            HandoffData {
+                id: v["id"].as_i64().unwrap_or(0),
+                name: v["name"].as_str().unwrap_or("").to_string(),
+                from_agent: data
+                    .get("from_agent")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                to_agent: data
+                    .get("to_agent")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                manifest: data.get("manifest").cloned().unwrap_or_default(),
+                created_at: data
+                    .get("created_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             }
-        }
-    }
+        })
+        .collect();
+
+    let savings = &knowledge["token_savings"];
+    let token_savings = TokenSavings {
+        unique_agents: savings["unique_agents"].as_i64().unwrap_or(0),
+        estimated_file_tokens: savings["estimated_file_tokens"].as_i64().unwrap_or(0),
+        without_sharing: savings["without_sharing"].as_i64().unwrap_or(0),
+        with_sharing: savings["with_sharing"].as_i64().unwrap_or(0),
+        saved: savings["saved"].as_i64().unwrap_or(0),
+        percentage_reduction: savings["percentage_reduction"].as_f64().unwrap_or(0.0),
+    };
 
     Ok(Json(KnowledgeResponse {
         target: query.target,
+        queried_at,
+        total_entities,
         discovery_count,
-        token_savings: TokenSavings { total, by_type },
+        discoveries,
+        handoff_count,
+        handoffs,
+        token_savings,
     }))
 }
 
