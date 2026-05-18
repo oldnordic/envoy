@@ -3,7 +3,7 @@ name = "envoy"
 version = "0.1.0"
 edition = "2021"
 description = "Message/coordination server for AI coding agents using sqlitegraph pub/sub"
-license = "GPL-3.0"
+license = "GPL-3.0-only"
 repository = "https://github.com/oldnordic/envoy"
 
 [dependencies]
