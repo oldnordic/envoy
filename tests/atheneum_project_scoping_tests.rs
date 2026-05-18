@@ -45,7 +45,9 @@ async fn post_json(
                 .method(axum::http::Method::POST)
                 .uri(uri)
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&body).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -107,8 +109,11 @@ async fn test_discovery_filtered_by_project_param() {
     .await;
     assert_eq!(s2, axum::http::StatusCode::CREATED);
 
-    let (s3, envoy_only) =
-        get_json(&app, "/atheneum/discoveries?target=shared_name&project=envoy").await;
+    let (s3, envoy_only) = get_json(
+        &app,
+        "/atheneum/discoveries?target=shared_name&project=envoy",
+    )
+    .await;
     assert_eq!(s3, axum::http::StatusCode::OK);
     assert_eq!(envoy_only["discovery_count"], json!(1));
 

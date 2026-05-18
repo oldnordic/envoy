@@ -223,12 +223,7 @@ pub async fn store_handoff(
     let handoff_id = tokio::task::spawn_blocking(move || {
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
-        atheneum.store_handoff_in_project(
-            &from_agent,
-            &to_agent,
-            project_id.as_deref(),
-            manifest,
-        )
+        atheneum.store_handoff_in_project(&from_agent, &to_agent, project_id.as_deref(), manifest)
     })
     .await
     .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
