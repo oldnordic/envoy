@@ -705,6 +705,129 @@ pub async fn ingest_journal(
 }
 
 // ============================================================================
+// Audit Trail (Stage 9)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ToolCallInput {
+    pub tool_name: String,
+    pub args: serde_json::Value,
+    #[serde(default)]
+    pub modified_targets: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateActionRequest {
+    pub agent: String,
+    pub thought: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallInput>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActionTraceResponse {
+    pub agent_id: i64,
+    pub reasoning_log_id: i64,
+    pub tool_call_ids: Vec<i64>,
+    pub modified_edge_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetActionsQuery {
+    pub agent: String,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetActionsResponse {
+    pub actions: Vec<serde_json::Value>,
+}
+
+pub async fn create_action(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<CreateActionRequest>,
+) -> Result<(axum::http::StatusCode, Json<ActionTraceResponse>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let trace = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::{AtheneumGraph, ToolCallRecord};
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        let tool_calls: Vec<ToolCallRecord> = req
+            .tool_calls
+            .into_iter()
+            .map(|tc| ToolCallRecord {
+                tool_name: tc.tool_name,
+                args: tc.args,
+                modified_targets: tc.modified_targets,
+            })
+            .collect();
+        g.record_agent_action(
+            &req.agent,
+            &req.thought,
+            tool_calls,
+            req.project_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ActionTraceResponse {
+            agent_id: trace.agent_id,
+            reasoning_log_id: trace.reasoning_log_id,
+            tool_call_ids: trace.tool_call_ids,
+            modified_edge_ids: trace.modified_edge_ids,
+        }),
+    ))
+}
+
+pub async fn get_actions(
+    State(state): State<Arc<TestState>>,
+    Query(query): Query<GetActionsQuery>,
+) -> Result<Json<GetActionsResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let agent = query.agent.clone();
+    let project = query.project.clone();
+
+    let actions: Vec<serde_json::Value> =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<serde_json::Value>> {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+            let records = g.get_action_trace(&agent, project.as_deref())?;
+            Ok(records
+                .into_iter()
+                .map(|r| {
+                    json!({
+                        "reasoning_log": entity_to_json(r.reasoning_log),
+                        "tool_calls": r
+                            .tool_calls
+                            .into_iter()
+                            .map(|tc| {
+                                json!({
+                                    "tool_call": entity_to_json(tc.tool_call),
+                                    "modified": tc
+                                        .modified
+                                        .into_iter()
+                                        .map(entity_to_json)
+                                        .collect::<Vec<_>>(),
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+        .map_err(envoy::error::EnvoyError::Atheneum)?;
+
+    Ok(Json(GetActionsResponse { actions }))
+}
+
+// ============================================================================
 // Router Builder
 // ============================================================================
 
@@ -782,5 +905,9 @@ pub fn build_test_router(state: Arc<TestState>) -> Router {
             axum::routing::post(create_task_blocker),
         )
         .route("/atheneum/journals", axum::routing::post(ingest_journal))
+        .route(
+            "/atheneum/actions",
+            axum::routing::post(create_action).get(get_actions),
+        )
         .with_state(state)
 }

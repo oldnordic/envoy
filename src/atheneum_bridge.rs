@@ -785,6 +785,127 @@ pub async fn post_journal(
     ))
 }
 
+// ============================================================================
+// Stage 9 — Audit Trail HTTP
+// ============================================================================
+//
+// Exposes record_agent_action + get_action_trace from atheneum so agents
+// can write/read the provenance chain over the wire.
+
+#[derive(Debug, Deserialize)]
+pub struct ToolCallInput {
+    pub tool_name: String,
+    pub args: serde_json::Value,
+    #[serde(default)]
+    pub modified_targets: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateActionRequest {
+    pub agent: String,
+    pub thought: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallInput>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActionTraceResponse {
+    pub agent_id: i64,
+    pub reasoning_log_id: i64,
+    pub tool_call_ids: Vec<i64>,
+    pub modified_edge_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetActionsQuery {
+    pub agent: String,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetActionsResponse {
+    pub actions: Vec<serde_json::Value>,
+}
+
+/// POST /atheneum/actions — record_agent_action over HTTP, returns the
+/// full ActionTrace (agent id, log id, tool call ids, modified edge ids).
+pub async fn post_action(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateActionRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let trace = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::{AtheneumGraph, ToolCallRecord};
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            let tool_calls: Vec<ToolCallRecord> = req
+                .tool_calls
+                .into_iter()
+                .map(|tc| ToolCallRecord {
+                    tool_name: tc.tool_name,
+                    args: tc.args,
+                    modified_targets: tc.modified_targets,
+                })
+                .collect();
+            g.record_agent_action(&req.agent, &req.thought, tool_calls, req.project_id.as_deref())
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ActionTraceResponse {
+            agent_id: trace.agent_id,
+            reasoning_log_id: trace.reasoning_log_id,
+            tool_call_ids: trace.tool_call_ids,
+            modified_edge_ids: trace.modified_edge_ids,
+        }),
+    ))
+}
+
+/// GET /atheneum/actions?agent=X[&project=Y] — get_action_trace over HTTP.
+pub async fn get_actions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<GetActionsQuery>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let agent = query.agent.clone();
+    let project = query.project.clone();
+
+    let actions: Vec<serde_json::Value> = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            let records = g
+                .get_action_trace(&agent, project.as_deref())
+                .map_err(crate::error::EnvoyError::from)?;
+            Ok(records
+                .into_iter()
+                .map(|r| {
+                    json!({
+                        "reasoning_log": entity_to_json(r.reasoning_log),
+                        "tool_calls": r
+                            .tool_calls
+                            .into_iter()
+                            .map(|tc| json!({
+                                "tool_call": entity_to_json(tc.tool_call),
+                                "modified": tc.modified.into_iter().map(entity_to_json).collect::<Vec<_>>(),
+                            }))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect())
+        })
+        .await?;
+
+    Ok(Json(GetActionsResponse { actions }))
+}
+
 /// Add atheneum bridge routes to an existing router
 pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
     router
@@ -822,4 +943,8 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
             axum::routing::post(post_task_blocker),
         )
         .route("/atheneum/journals", axum::routing::post(post_journal))
+        .route(
+            "/atheneum/actions",
+            axum::routing::post(post_action).get(get_actions),
+        )
 }
