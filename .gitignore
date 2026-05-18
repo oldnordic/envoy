@@ -6,6 +6,12 @@
 # Internal agent-facing files — not user-facing
 AGENTS.md
 CLAUDE.md
+GEMINI.md
+.mcp.json
+.mcp/
+.magellan/
+.hermes/
+.claude/
 .drafts/
 docs/superpowers/
 /config.local.toml
