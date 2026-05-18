@@ -29,6 +29,8 @@ pub struct StoreDiscoveryRequest {
     pub agent: String,
     pub discovery_type: String,
     pub target: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub metadata: serde_json::Value,
 }
 
@@ -43,6 +45,8 @@ pub struct StoreDiscoveryResponse {
 #[derive(Debug, Deserialize)]
 pub struct DiscoveriesQuery {
     pub target: String,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +67,8 @@ pub struct DiscoveryData {
 pub struct StoreHandoffRequest {
     pub from_agent: String,
     pub to_agent: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub manifest: serde_json::Value,
 }
 
@@ -77,6 +83,8 @@ pub struct StoreHandoffResponse {
 #[derive(Debug, Deserialize)]
 pub struct PendingHandoffQuery {
     pub agent: String,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,6 +111,8 @@ pub struct ClaimHandoffResponse {
 #[derive(Debug, Deserialize)]
 pub struct KnowledgeQuery {
     pub target: String,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,11 +150,18 @@ pub async fn store_discovery(
     let discovery_type = req.discovery_type.clone();
     let target = req.target.clone();
     let metadata = req.metadata.clone();
+    let project_id = req.project_id.clone();
 
     let discovery_id = tokio::task::spawn_blocking(move || {
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
-        atheneum.store_discovery(&agent, &discovery_type, &target, metadata)
+        atheneum.store_discovery_in_project(
+            &agent,
+            &discovery_type,
+            &target,
+            project_id.as_deref(),
+            metadata,
+        )
     })
     .await
     .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
@@ -166,11 +183,12 @@ pub async fn get_discoveries(
 ) -> Result<Json<DiscoveriesResponse>, envoy::error::EnvoyError> {
     let atheneum_path = state.atheneum_path.clone();
     let target = query.target.clone();
+    let project = query.project.clone();
 
     let discoveries = tokio::task::spawn_blocking(move || {
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
-        atheneum.query_discoveries(&target)
+        atheneum.query_discoveries_in_project(&target, project.as_deref())
     })
     .await
     .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
@@ -200,11 +218,17 @@ pub async fn store_handoff(
     let from_agent = req.from_agent.clone();
     let to_agent = req.to_agent.clone();
     let manifest = req.manifest.clone();
+    let project_id = req.project_id.clone();
 
     let handoff_id = tokio::task::spawn_blocking(move || {
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
-        atheneum.store_handoff(&from_agent, &to_agent, manifest)
+        atheneum.store_handoff_in_project(
+            &from_agent,
+            &to_agent,
+            project_id.as_deref(),
+            manifest,
+        )
     })
     .await
     .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
@@ -225,11 +249,12 @@ pub async fn get_pending_handoff(
     Query(query): Query<PendingHandoffQuery>,
 ) -> Result<Json<PendingHandoffResponse>, envoy::error::EnvoyError> {
     let atheneum_path = state.atheneum_path.clone();
+    let project = query.project.clone();
 
     let handoff = tokio::task::spawn_blocking(move || {
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
-        atheneum.get_pending_handoff(&query.agent)
+        atheneum.get_pending_handoff_in_project(&query.agent, project.as_deref())
     })
     .await
     .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
@@ -282,11 +307,12 @@ pub async fn get_knowledge(
 ) -> Result<Json<KnowledgeResponse>, envoy::error::EnvoyError> {
     let atheneum_path = state.atheneum_path.clone();
     let target = query.target.clone();
+    let project = query.project.clone();
 
     let knowledge = tokio::task::spawn_blocking(move || {
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
-        atheneum.query_knowledge(&target)
+        atheneum.query_knowledge_in_project(&target, project.as_deref())
     })
     .await
     .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
