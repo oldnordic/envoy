@@ -906,6 +906,208 @@ pub async fn get_actions(
     Ok(Json(GetActionsResponse { actions }))
 }
 
+// ============================================================================
+// Stage 10 — Ontology HTTP
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CreateClassRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClassCreatedResponse {
+    pub class_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListClassesResponse {
+    pub classes: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePropertyRequest {
+    pub name: String,
+    pub domain_class: String,
+    pub range_class: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PropertyCreatedResponse {
+    pub property_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListPropertiesResponse {
+    pub properties: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ValidateEdgeQuery {
+    pub from: String,
+    pub to: String,
+    pub edge: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ValidateEdgeResponse {
+    pub allowed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SeedResponse {
+    pub seeded: i64,
+}
+
+/// POST /atheneum/ontology/classes — register or update an ontology class.
+pub async fn post_ontology_class(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateClassRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let id = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.define_class(&req.name, req.description.as_deref())
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ClassCreatedResponse { class_id: id }),
+    ))
+}
+
+/// GET /atheneum/ontology/classes — list registered classes.
+pub async fn get_ontology_classes(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let classes: Vec<serde_json::Value> = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            let classes = g
+                .list_classes()
+                .map_err(crate::error::EnvoyError::from)?;
+            Ok(classes
+                .into_iter()
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "name": c.name,
+                        "description": c.description,
+                    })
+                })
+                .collect())
+        })
+        .await?;
+    Ok(Json(ListClassesResponse { classes }))
+}
+
+/// POST /atheneum/ontology/properties — register or update an ontology property.
+pub async fn post_ontology_property(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreatePropertyRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let id = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.define_property(
+                &req.name,
+                &req.domain_class,
+                &req.range_class,
+                req.description.as_deref(),
+            )
+            .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(PropertyCreatedResponse { property_id: id }),
+    ))
+}
+
+/// GET /atheneum/ontology/properties — list registered properties.
+pub async fn get_ontology_properties(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let properties: Vec<serde_json::Value> = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            let properties = g
+                .list_properties()
+                .map_err(crate::error::EnvoyError::from)?;
+            Ok(properties
+                .into_iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id,
+                        "name": p.name,
+                        "domain_class": p.domain_class,
+                        "range_class": p.range_class,
+                        "description": p.description,
+                    })
+                })
+                .collect())
+        })
+        .await?;
+    Ok(Json(ListPropertiesResponse { properties }))
+}
+
+/// GET /atheneum/ontology/validate?from=&to=&edge= — open-mode validation
+/// of a candidate `(from)-[edge]->(to)`.
+pub async fn get_ontology_validate(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ValidateEdgeQuery>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let allowed = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.validate_edge(&query.from, &query.to, &query.edge)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok(Json(ValidateEdgeResponse { allowed }))
+}
+
+/// POST /atheneum/ontology/seed — idempotently populate the 15 standard
+/// classes (Agent, Task, Project, CodeSymbol, WikiPage, …).
+pub async fn post_ontology_seed(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let seeded: i64 = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.seed_standard_ontology()
+                .map_err(crate::error::EnvoyError::from)?;
+            Ok(g.list_classes()
+                .map_err(crate::error::EnvoyError::from)?
+                .len() as i64)
+        })
+        .await?;
+    Ok(Json(SeedResponse { seeded }))
+}
+
 /// Add atheneum bridge routes to an existing router
 pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
     router
@@ -946,5 +1148,21 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
         .route(
             "/atheneum/actions",
             axum::routing::post(post_action).get(get_actions),
+        )
+        .route(
+            "/atheneum/ontology/classes",
+            axum::routing::post(post_ontology_class).get(get_ontology_classes),
+        )
+        .route(
+            "/atheneum/ontology/properties",
+            axum::routing::post(post_ontology_property).get(get_ontology_properties),
+        )
+        .route(
+            "/atheneum/ontology/validate",
+            axum::routing::get(get_ontology_validate),
+        )
+        .route(
+            "/atheneum/ontology/seed",
+            axum::routing::post(post_ontology_seed),
         )
 }

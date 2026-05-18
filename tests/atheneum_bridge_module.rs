@@ -828,6 +828,187 @@ pub async fn get_actions(
 }
 
 // ============================================================================
+// Ontology (Stage 10)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CreateClassRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClassCreatedResponse {
+    pub class_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListClassesResponse {
+    pub classes: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePropertyRequest {
+    pub name: String,
+    pub domain_class: String,
+    pub range_class: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PropertyCreatedResponse {
+    pub property_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListPropertiesResponse {
+    pub properties: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ValidateEdgeQuery {
+    pub from: String,
+    pub to: String,
+    pub edge: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ValidateEdgeResponse {
+    pub allowed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SeedResponse {
+    pub seeded: i64,
+}
+
+pub async fn create_class(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<CreateClassRequest>,
+) -> Result<(axum::http::StatusCode, Json<ClassCreatedResponse>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.define_class(&req.name, req.description.as_deref())
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ClassCreatedResponse { class_id: id }),
+    ))
+}
+
+pub async fn list_classes(
+    State(state): State<Arc<TestState>>,
+) -> Result<Json<ListClassesResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let classes: Vec<serde_json::Value> =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+            Ok(g.list_classes()?
+                .into_iter()
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "name": c.name,
+                        "description": c.description,
+                    })
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+        .map_err(envoy::error::EnvoyError::Atheneum)?;
+    Ok(Json(ListClassesResponse { classes }))
+}
+
+pub async fn create_property(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<CreatePropertyRequest>,
+) -> Result<(axum::http::StatusCode, Json<PropertyCreatedResponse>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.define_property(
+            &req.name,
+            &req.domain_class,
+            &req.range_class,
+            req.description.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(PropertyCreatedResponse { property_id: id }),
+    ))
+}
+
+pub async fn list_properties(
+    State(state): State<Arc<TestState>>,
+) -> Result<Json<ListPropertiesResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let properties: Vec<serde_json::Value> =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+            Ok(g.list_properties()?
+                .into_iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id,
+                        "name": p.name,
+                        "domain_class": p.domain_class,
+                        "range_class": p.range_class,
+                        "description": p.description,
+                    })
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+        .map_err(envoy::error::EnvoyError::Atheneum)?;
+    Ok(Json(ListPropertiesResponse { properties }))
+}
+
+pub async fn validate_edge(
+    State(state): State<Arc<TestState>>,
+    Query(query): Query<ValidateEdgeQuery>,
+) -> Result<Json<ValidateEdgeResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let allowed = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.validate_edge(&query.from, &query.to, &query.edge)
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+    Ok(Json(ValidateEdgeResponse { allowed }))
+}
+
+pub async fn seed_ontology(
+    State(state): State<Arc<TestState>>,
+) -> Result<Json<SeedResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let seeded = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.seed_standard_ontology()?;
+        Ok(g.list_classes()?.len() as i64)
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+    .map_err(envoy::error::EnvoyError::Atheneum)?;
+    Ok(Json(SeedResponse { seeded }))
+}
+
+// ============================================================================
 // Router Builder
 // ============================================================================
 
@@ -908,6 +1089,22 @@ pub fn build_test_router(state: Arc<TestState>) -> Router {
         .route(
             "/atheneum/actions",
             axum::routing::post(create_action).get(get_actions),
+        )
+        .route(
+            "/atheneum/ontology/classes",
+            axum::routing::post(create_class).get(list_classes),
+        )
+        .route(
+            "/atheneum/ontology/properties",
+            axum::routing::post(create_property).get(list_properties),
+        )
+        .route(
+            "/atheneum/ontology/validate",
+            axum::routing::get(validate_edge),
+        )
+        .route(
+            "/atheneum/ontology/seed",
+            axum::routing::post(seed_ontology),
         )
         .with_state(state)
 }
