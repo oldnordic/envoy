@@ -105,6 +105,36 @@ pub struct KnowledgeQuery {
     pub project: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+    #[serde(default = "default_search_k")]
+    pub k: usize,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+fn default_search_k() -> usize {
+    5
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub project: Option<String>,
+    pub count: usize,
+    pub results: Vec<SearchResultItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResultItem {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub score: f32,
+    pub data: serde_json::Value,
+}
+
 #[derive(Debug, Serialize)]
 pub struct KnowledgeResponse {
     pub target: String,
@@ -412,6 +442,53 @@ pub async fn get_knowledge(
 // Router Builder
 // ============================================================================
 
+/// GET /atheneum/search?q=<text>[&k=N&project=Y] - Semantic search
+pub async fn get_search(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SearchQuery>,
+) -> Result<impl axum::response::IntoResponse> {
+    let q = query.q.clone();
+    let project = query.project.clone();
+    let k = query.k.max(1);
+    let atheneum_path = state.atheneum_path.clone();
+
+    let results: Vec<SearchResultItem> = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            // Rebuild the index on each request — small DBs, in-memory HNSW,
+            // and this keeps fresh discoveries searchable without a separate
+            // "reindex" endpoint. Swap to lazy/periodic if it ever shows up
+            // in a profile.
+            atheneum
+                .build_search_index()
+                .map_err(crate::error::EnvoyError::from)?;
+            let hits = atheneum
+                .semantic_search(&q, k, project.as_deref())
+                .map_err(crate::error::EnvoyError::from)?;
+            Ok(hits
+                .into_iter()
+                .map(|h| SearchResultItem {
+                    id: h.id,
+                    name: h.name,
+                    kind: h.kind,
+                    score: h.score,
+                    data: h.data,
+                })
+                .collect())
+        })
+        .await?;
+
+    let count = results.len();
+    Ok(Json(SearchResponse {
+        query: query.q,
+        project: query.project,
+        count,
+        results,
+    }))
+}
+
 /// Add atheneum bridge routes to an existing router
 pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
     router
@@ -427,4 +504,5 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
             axum::routing::post(claim_handoff),
         )
         .route("/atheneum/knowledge", axum::routing::get(get_knowledge))
+        .route("/atheneum/search", axum::routing::get(get_search))
 }

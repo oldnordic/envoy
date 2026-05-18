@@ -115,6 +115,36 @@ pub struct KnowledgeQuery {
     pub project: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+    #[serde(default = "default_search_k")]
+    pub k: usize,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+fn default_search_k() -> usize {
+    5
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub project: Option<String>,
+    pub count: usize,
+    pub results: Vec<SearchResultItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResultItem {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub score: f32,
+    pub data: serde_json::Value,
+}
+
 #[derive(Debug, Serialize)]
 pub struct KnowledgeResponse {
     pub target: String,
@@ -386,6 +416,45 @@ pub async fn get_knowledge(
 // Router Builder
 // ============================================================================
 
+pub async fn get_search(
+    State(state): State<Arc<TestState>>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<SearchResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let q = query.q.clone();
+    let project = query.project.clone();
+    let k = query.k.max(1);
+
+    let results: Vec<SearchResultItem> = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.build_search_index()?;
+        let hits = atheneum.semantic_search(&q, k, project.as_deref())?;
+        Ok::<_, anyhow::Error>(
+            hits.into_iter()
+                .map(|h| SearchResultItem {
+                    id: h.id,
+                    name: h.name,
+                    kind: h.kind,
+                    score: h.score,
+                    data: h.data,
+                })
+                .collect(),
+        )
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+    .map_err(envoy::error::EnvoyError::Atheneum)?;
+
+    let count = results.len();
+    Ok(Json(SearchResponse {
+        query: query.q,
+        project: query.project,
+        count,
+        results,
+    }))
+}
+
 pub fn build_test_router(state: Arc<TestState>) -> Router {
     Router::new()
         .route(
@@ -402,5 +471,6 @@ pub fn build_test_router(state: Arc<TestState>) -> Router {
             axum::routing::post(claim_handoff),
         )
         .route("/atheneum/knowledge", axum::routing::get(get_knowledge))
+        .route("/atheneum/search", axum::routing::get(get_search))
         .with_state(state)
 }
