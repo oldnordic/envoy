@@ -66,10 +66,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "sqlitegraph 3.0.1",
  "thiserror 2.0.18",
  "tracing",

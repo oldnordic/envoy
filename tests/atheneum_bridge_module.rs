@@ -8,6 +8,7 @@
 use axum::extract::{Path, Query, State};
 use axum::{routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 
 use envoy::engine::Engine;
@@ -413,6 +414,297 @@ pub async fn get_knowledge(
 }
 
 // ============================================================================
+// Planning + Journal (Stage 8)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTaskRequest {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskCreatedResponse {
+    pub task_id: i64,
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListTasksQuery {
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListTasksResponse {
+    pub tasks: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTaskStatusRequest {
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskDetailResponse {
+    pub task: serde_json::Value,
+    pub requirements: Vec<serde_json::Value>,
+    pub blockers: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRequirementRequest {
+    pub statement: String,
+    #[serde(default)]
+    pub verification_method: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBlockerRequest {
+    pub description: String,
+    pub blocker_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IngestJournalRequest {
+    pub path: String,
+    pub content: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IngestJournalResponse {
+    pub section_ids: Vec<i64>,
+    pub applied_kanban_updates: Vec<serde_json::Value>,
+}
+
+fn parse_status(s: &str) -> Result<atheneum::graph::KanbanStatus, envoy::error::EnvoyError> {
+    match s.to_ascii_uppercase().as_str() {
+        "TODO" => Ok(atheneum::graph::KanbanStatus::Todo),
+        "IN_PROGRESS" | "INPROGRESS" => Ok(atheneum::graph::KanbanStatus::InProgress),
+        "DONE" => Ok(atheneum::graph::KanbanStatus::Done),
+        "BLOCKED" => Ok(atheneum::graph::KanbanStatus::Blocked),
+        other => Err(envoy::error::EnvoyError::Atheneum(anyhow::anyhow!(
+            "Unknown KanbanStatus '{}'",
+            other
+        ))),
+    }
+}
+
+fn parse_blocker_type(s: &str) -> Result<atheneum::graph::BlockerType, envoy::error::EnvoyError> {
+    match s.to_ascii_uppercase().as_str() {
+        "DEPENDENCY" => Ok(atheneum::graph::BlockerType::Dependency),
+        "BUG" => Ok(atheneum::graph::BlockerType::Bug),
+        "INFO_GAP" | "INFOGAP" => Ok(atheneum::graph::BlockerType::InfoGap),
+        other => Err(envoy::error::EnvoyError::Atheneum(anyhow::anyhow!(
+            "Unknown BlockerType '{}'",
+            other
+        ))),
+    }
+}
+
+fn entity_to_json(entity: atheneum::GraphEntity) -> serde_json::Value {
+    json!({
+        "id": entity.id,
+        "kind": entity.kind,
+        "name": entity.name,
+        "file_path": entity.file_path,
+        "data": entity.data,
+    })
+}
+
+pub async fn create_task(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<CreateTaskRequest>,
+) -> Result<(axum::http::StatusCode, Json<TaskCreatedResponse>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let task_id = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.create_task(
+            &req.title,
+            req.description.as_deref(),
+            req.project_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(TaskCreatedResponse {
+            task_id,
+            status: "TODO".to_string(),
+        }),
+    ))
+}
+
+pub async fn list_tasks(
+    State(state): State<Arc<TestState>>,
+    Query(query): Query<ListTasksQuery>,
+) -> Result<Json<ListTasksResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let project = query.project.clone();
+    let status_str = query.status.clone();
+
+    let tasks = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<serde_json::Value>> {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        let entities = match status_str {
+            Some(s) => {
+                let status = match s.to_ascii_uppercase().as_str() {
+                    "TODO" => atheneum::graph::KanbanStatus::Todo,
+                    "IN_PROGRESS" | "INPROGRESS" => atheneum::graph::KanbanStatus::InProgress,
+                    "DONE" => atheneum::graph::KanbanStatus::Done,
+                    "BLOCKED" => atheneum::graph::KanbanStatus::Blocked,
+                    other => anyhow::bail!("Unknown KanbanStatus '{}'", other),
+                };
+                g.list_tasks_by_status(status, project.as_deref())?
+            }
+            None => {
+                let all = g.entities_by_kind("Task")?;
+                all.into_iter()
+                    .filter(|t| match &project {
+                        None => true,
+                        Some(pid) => t.data.get("project_id").and_then(|v| v.as_str()) == Some(pid),
+                    })
+                    .collect()
+            }
+        };
+        Ok(entities.into_iter().map(entity_to_json).collect())
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+    .map_err(envoy::error::EnvoyError::Atheneum)?;
+
+    Ok(Json(ListTasksResponse { tasks }))
+}
+
+pub async fn get_task_details(
+    State(state): State<Arc<TestState>>,
+    axum::extract::Path(task_id): axum::extract::Path<i64>,
+) -> Result<Json<TaskDetailResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let detail = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.get_task_with_details(task_id)
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok(Json(TaskDetailResponse {
+        task: entity_to_json(detail.task),
+        requirements: detail
+            .requirements
+            .into_iter()
+            .map(entity_to_json)
+            .collect(),
+        blockers: detail.blockers.into_iter().map(entity_to_json).collect(),
+    }))
+}
+
+pub async fn patch_task_status(
+    State(state): State<Arc<TestState>>,
+    axum::extract::Path(task_id): axum::extract::Path<i64>,
+    Json(req): Json<UpdateTaskStatusRequest>,
+) -> Result<axum::http::StatusCode, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let status = parse_status(&req.status)?;
+    tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.update_task_status(task_id, status)
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+    Ok(axum::http::StatusCode::OK)
+}
+
+pub async fn create_task_requirement(
+    State(state): State<Arc<TestState>>,
+    axum::extract::Path(task_id): axum::extract::Path<i64>,
+    Json(req): Json<CreateRequirementRequest>,
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let id = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.add_requirement(task_id, &req.statement, req.verification_method.as_deref())
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({"requirement_id": id})),
+    ))
+}
+
+pub async fn create_task_blocker(
+    State(state): State<Arc<TestState>>,
+    axum::extract::Path(task_id): axum::extract::Path<i64>,
+    Json(req): Json<CreateBlockerRequest>,
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let blocker_type = parse_blocker_type(&req.blocker_type)?;
+    let id = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.add_blocker(task_id, &req.description, blocker_type)
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({"blocker_id": id})),
+    ))
+}
+
+pub async fn ingest_journal(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<IngestJournalRequest>,
+) -> Result<(axum::http::StatusCode, Json<IngestJournalResponse>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let (section_ids, applied) = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<(Vec<i64>, Vec<serde_json::Value>)> {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+            let ids = g.ingest_journal(&req.path, &req.content, req.project_id.as_deref())?;
+            let mut all_applied: Vec<serde_json::Value> = Vec::new();
+            for sid in &ids {
+                let applied = g.apply_kanban_updates_from_journal(*sid)?;
+                for u in applied {
+                    all_applied.push(json!({
+                        "task_id": u.task_id,
+                        "task_title": u.task_title,
+                        "previous_status": u.previous_status.as_str(),
+                        "new_status": u.new_status.as_str(),
+                    }));
+                }
+            }
+            Ok((ids, all_applied))
+        },
+    )
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+    .map_err(envoy::error::EnvoyError::Atheneum)?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(IngestJournalResponse {
+            section_ids,
+            applied_kanban_updates: applied,
+        }),
+    ))
+}
+
+// ============================================================================
 // Router Builder
 // ============================================================================
 
@@ -472,5 +764,23 @@ pub fn build_test_router(state: Arc<TestState>) -> Router {
         )
         .route("/atheneum/knowledge", axum::routing::get(get_knowledge))
         .route("/atheneum/search", axum::routing::get(get_search))
+        .route(
+            "/atheneum/tasks",
+            axum::routing::post(create_task).get(list_tasks),
+        )
+        .route("/atheneum/tasks/{id}", axum::routing::get(get_task_details))
+        .route(
+            "/atheneum/tasks/{id}/status",
+            axum::routing::patch(patch_task_status),
+        )
+        .route(
+            "/atheneum/tasks/{id}/requirements",
+            axum::routing::post(create_task_requirement),
+        )
+        .route(
+            "/atheneum/tasks/{id}/blockers",
+            axum::routing::post(create_task_blocker),
+        )
+        .route("/atheneum/journals", axum::routing::post(ingest_journal))
         .with_state(state)
 }

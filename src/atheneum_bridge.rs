@@ -5,6 +5,7 @@
 use axum::extract::{Path, Query, State};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 
 use crate::error::Result;
@@ -489,6 +490,301 @@ pub async fn get_search(
     }))
 }
 
+// ============================================================================
+// Stage 8 — Planning + Journal HTTP
+// ============================================================================
+//
+// Mirrors the test-helper handlers in tests/atheneum_bridge_module.rs.
+// See atheneum::graph for the underlying methods.
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTaskRequest {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskCreatedResponse {
+    pub task_id: i64,
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListTasksQuery {
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListTasksResponse {
+    pub tasks: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTaskStatusRequest {
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskDetailResponse {
+    pub task: serde_json::Value,
+    pub requirements: Vec<serde_json::Value>,
+    pub blockers: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRequirementRequest {
+    pub statement: String,
+    #[serde(default)]
+    pub verification_method: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBlockerRequest {
+    pub description: String,
+    pub blocker_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IngestJournalRequest {
+    pub path: String,
+    pub content: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IngestJournalResponse {
+    pub section_ids: Vec<i64>,
+    pub applied_kanban_updates: Vec<serde_json::Value>,
+}
+
+fn parse_status(s: &str) -> Result<atheneum::graph::KanbanStatus> {
+    match s.to_ascii_uppercase().as_str() {
+        "TODO" => Ok(atheneum::graph::KanbanStatus::Todo),
+        "IN_PROGRESS" | "INPROGRESS" => Ok(atheneum::graph::KanbanStatus::InProgress),
+        "DONE" => Ok(atheneum::graph::KanbanStatus::Done),
+        "BLOCKED" => Ok(atheneum::graph::KanbanStatus::Blocked),
+        other => Err(crate::error::EnvoyError::Atheneum(anyhow::anyhow!(
+            "Unknown KanbanStatus '{}'",
+            other
+        ))),
+    }
+}
+
+fn parse_blocker_type(s: &str) -> Result<atheneum::graph::BlockerType> {
+    match s.to_ascii_uppercase().as_str() {
+        "DEPENDENCY" => Ok(atheneum::graph::BlockerType::Dependency),
+        "BUG" => Ok(atheneum::graph::BlockerType::Bug),
+        "INFO_GAP" | "INFOGAP" => Ok(atheneum::graph::BlockerType::InfoGap),
+        other => Err(crate::error::EnvoyError::Atheneum(anyhow::anyhow!(
+            "Unknown BlockerType '{}'",
+            other
+        ))),
+    }
+}
+
+fn entity_to_json(entity: atheneum::GraphEntity) -> serde_json::Value {
+    json!({
+        "id": entity.id,
+        "kind": entity.kind,
+        "name": entity.name,
+        "file_path": entity.file_path,
+        "data": entity.data,
+    })
+}
+
+pub async fn post_task(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateTaskRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let task_id = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.create_task(&req.title, req.description.as_deref(), req.project_id.as_deref())
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(TaskCreatedResponse {
+            task_id,
+            status: "TODO".to_string(),
+        }),
+    ))
+}
+
+pub async fn get_tasks(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListTasksQuery>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let project = query.project.clone();
+    let status_str = query.status.clone();
+
+    let tasks: Vec<serde_json::Value> = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            let entities = match status_str {
+                Some(s) => {
+                    let status = parse_status(&s)?;
+                    g.list_tasks_by_status(status, project.as_deref())
+                        .map_err(crate::error::EnvoyError::from)?
+                }
+                None => {
+                    let all = g
+                        .entities_by_kind("Task")
+                        .map_err(crate::error::EnvoyError::from)?;
+                    all.into_iter()
+                        .filter(|t| match &project {
+                            None => true,
+                            Some(pid) => {
+                                t.data.get("project_id").and_then(|v| v.as_str()) == Some(pid)
+                            }
+                        })
+                        .collect()
+                }
+            };
+            Ok(entities.into_iter().map(entity_to_json).collect())
+        })
+        .await?;
+
+    Ok(Json(ListTasksResponse { tasks }))
+}
+
+pub async fn get_task_details_route(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let detail = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.get_task_with_details(task_id)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok(Json(TaskDetailResponse {
+        task: entity_to_json(detail.task),
+        requirements: detail.requirements.into_iter().map(entity_to_json).collect(),
+        blockers: detail.blockers.into_iter().map(entity_to_json).collect(),
+    }))
+}
+
+pub async fn patch_task_status_route(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<i64>,
+    Json(req): Json<UpdateTaskStatusRequest>,
+) -> Result<axum::http::StatusCode> {
+    let atheneum_path = state.atheneum_path.clone();
+    let status = parse_status(&req.status)?;
+    state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.update_task_status(task_id, status)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok(axum::http::StatusCode::OK)
+}
+
+pub async fn post_task_requirement(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<i64>,
+    Json(req): Json<CreateRequirementRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let id = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.add_requirement(task_id, &req.statement, req.verification_method.as_deref())
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({"requirement_id": id})),
+    ))
+}
+
+pub async fn post_task_blocker(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<i64>,
+    Json(req): Json<CreateBlockerRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let blocker_type = parse_blocker_type(&req.blocker_type)?;
+    let id = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.add_blocker(task_id, &req.description, blocker_type)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({"blocker_id": id})),
+    ))
+}
+
+pub async fn post_journal(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<IngestJournalRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let (section_ids, applied): (Vec<i64>, Vec<serde_json::Value>) = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            let ids = g
+                .ingest_journal(&req.path, &req.content, req.project_id.as_deref())
+                .map_err(crate::error::EnvoyError::from)?;
+            let mut all_applied: Vec<serde_json::Value> = Vec::new();
+            for sid in &ids {
+                let applied = g
+                    .apply_kanban_updates_from_journal(*sid)
+                    .map_err(crate::error::EnvoyError::from)?;
+                for u in applied {
+                    all_applied.push(json!({
+                        "task_id": u.task_id,
+                        "task_title": u.task_title,
+                        "previous_status": u.previous_status.as_str(),
+                        "new_status": u.new_status.as_str(),
+                    }));
+                }
+            }
+            Ok((ids, all_applied))
+        })
+        .await?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(IngestJournalResponse {
+            section_ids,
+            applied_kanban_updates: applied,
+        }),
+    ))
+}
+
 /// Add atheneum bridge routes to an existing router
 pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
     router
@@ -505,4 +801,25 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
         )
         .route("/atheneum/knowledge", axum::routing::get(get_knowledge))
         .route("/atheneum/search", axum::routing::get(get_search))
+        .route(
+            "/atheneum/tasks",
+            axum::routing::post(post_task).get(get_tasks),
+        )
+        .route(
+            "/atheneum/tasks/{id}",
+            axum::routing::get(get_task_details_route),
+        )
+        .route(
+            "/atheneum/tasks/{id}/status",
+            axum::routing::patch(patch_task_status_route),
+        )
+        .route(
+            "/atheneum/tasks/{id}/requirements",
+            axum::routing::post(post_task_requirement),
+        )
+        .route(
+            "/atheneum/tasks/{id}/blockers",
+            axum::routing::post(post_task_blocker),
+        )
+        .route("/atheneum/journals", axum::routing::post(post_journal))
 }
