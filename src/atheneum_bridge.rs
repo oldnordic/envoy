@@ -206,7 +206,7 @@ pub async fn post_discovery(
     let discovery_type2 = discovery_type.clone();
     let target2 = target.clone();
     let project_id = req.project_id.clone();
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
 
     let discovery_id = state
         .with_engine_async(move |_engine| {
@@ -244,7 +244,7 @@ pub async fn get_discoveries(
     let target = query.target.clone();
     let target2 = target.clone();
     let project = query.project.clone();
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
 
     let discoveries: Vec<DiscoveryData> = state
         .with_engine_async(move |_engine| {
@@ -285,7 +285,7 @@ pub async fn post_handoff(
     let from_agent2 = from_agent.clone();
     let to_agent2 = to_agent.clone();
     let project_id = req.project_id.clone();
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
 
     let handoff_id = state
         .with_engine_async(move |_engine| {
@@ -321,7 +321,7 @@ pub async fn get_pending_handoff(
 ) -> Result<impl axum::response::IntoResponse> {
     let agent = query.agent.clone();
     let project = query.project.clone();
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
 
     let handoff = state
         .with_engine_async(move |_engine| {
@@ -365,7 +365,7 @@ pub async fn claim_handoff(
     State(state): State<Arc<AppState>>,
     Path(handoff_id): Path<i64>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
 
     state
         .with_engine_async(move |_engine| {
@@ -392,7 +392,7 @@ pub async fn get_knowledge(
 ) -> Result<impl axum::response::IntoResponse> {
     let target = query.target.clone();
     let project = query.project.clone();
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
 
     let knowledge = state
         .with_engine_async(move |_engine| {
@@ -482,7 +482,7 @@ pub async fn get_search(
     let q = query.q.clone();
     let project = query.project.clone();
     let k = query.k.max(1);
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
 
     let results: Vec<SearchResultItem> = state
         .with_engine_async(move |_engine| {
@@ -634,14 +634,18 @@ pub async fn post_task(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let task_id = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
             let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
                 .map_err(crate::error::EnvoyError::from)?;
-            g.create_task(&req.title, req.description.as_deref(), req.project_id.as_deref())
-                .map_err(crate::error::EnvoyError::from)
+            g.create_task(
+                &req.title,
+                req.description.as_deref(),
+                req.project_id.as_deref(),
+            )
+            .map_err(crate::error::EnvoyError::from)
         })
         .await?;
     Ok((
@@ -657,7 +661,7 @@ pub async fn get_tasks(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListTasksQuery>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let project = query.project.clone();
     let status_str = query.status.clone();
 
@@ -697,7 +701,7 @@ pub async fn get_task_details_route(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<i64>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let detail = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
@@ -709,7 +713,11 @@ pub async fn get_task_details_route(
         .await?;
     Ok(Json(TaskDetailResponse {
         task: entity_to_json(detail.task),
-        requirements: detail.requirements.into_iter().map(entity_to_json).collect(),
+        requirements: detail
+            .requirements
+            .into_iter()
+            .map(entity_to_json)
+            .collect(),
         blockers: detail.blockers.into_iter().map(entity_to_json).collect(),
     }))
 }
@@ -719,7 +727,7 @@ pub async fn patch_task_status_route(
     Path(task_id): Path<i64>,
     Json(req): Json<UpdateTaskStatusRequest>,
 ) -> Result<axum::http::StatusCode> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let status = parse_status(&req.status)?;
     state
         .with_engine_async(move |_engine| {
@@ -738,7 +746,7 @@ pub async fn post_task_requirement(
     Path(task_id): Path<i64>,
     Json(req): Json<CreateRequirementRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let id = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
@@ -759,7 +767,7 @@ pub async fn post_task_blocker(
     Path(task_id): Path<i64>,
     Json(req): Json<CreateBlockerRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let blocker_type = parse_blocker_type(&req.blocker_type)?;
     let id = state
         .with_engine_async(move |_engine| {
@@ -780,7 +788,7 @@ pub async fn post_journal(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IngestJournalRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let (section_ids, applied): (Vec<i64>, Vec<serde_json::Value>) = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
@@ -867,7 +875,7 @@ pub async fn post_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateActionRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let trace = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::{AtheneumGraph, ToolCallRecord};
@@ -882,8 +890,13 @@ pub async fn post_action(
                     modified_targets: tc.modified_targets,
                 })
                 .collect();
-            g.record_agent_action(&req.agent, &req.thought, tool_calls, req.project_id.as_deref())
-                .map_err(crate::error::EnvoyError::from)
+            g.record_agent_action(
+                &req.agent,
+                &req.thought,
+                tool_calls,
+                req.project_id.as_deref(),
+            )
+            .map_err(crate::error::EnvoyError::from)
         })
         .await?;
 
@@ -903,7 +916,7 @@ pub async fn get_actions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GetActionsQuery>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let agent = query.agent.clone();
     let project = query.project.clone();
 
@@ -999,7 +1012,7 @@ pub async fn post_ontology_class(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateClassRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let id = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
@@ -1019,15 +1032,13 @@ pub async fn post_ontology_class(
 pub async fn get_ontology_classes(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let classes: Vec<serde_json::Value> = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
             let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
                 .map_err(crate::error::EnvoyError::from)?;
-            let classes = g
-                .list_classes()
-                .map_err(crate::error::EnvoyError::from)?;
+            let classes = g.list_classes().map_err(crate::error::EnvoyError::from)?;
             Ok(classes
                 .into_iter()
                 .map(|c| {
@@ -1048,7 +1059,7 @@ pub async fn post_ontology_property(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePropertyRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let id = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
@@ -1073,7 +1084,7 @@ pub async fn post_ontology_property(
 pub async fn get_ontology_properties(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let properties: Vec<serde_json::Value> = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
@@ -1105,7 +1116,7 @@ pub async fn get_ontology_validate(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ValidateEdgeQuery>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let allowed = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
@@ -1123,7 +1134,7 @@ pub async fn get_ontology_validate(
 pub async fn post_ontology_seed(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let seeded: i64 = state
         .with_engine_async(move |_engine| {
             use atheneum::graph::AtheneumGraph;
@@ -1145,7 +1156,7 @@ pub async fn post_import_magellan_symbol(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ImportMagellanSymbolRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
     let symbol_name = req.symbol_name;
     let agent_name = req.agent_name;
@@ -1192,7 +1203,7 @@ pub async fn post_import_magellan_all(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ImportMagellanBulkRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.atheneum_path.clone();
+    let atheneum_path = state.require_atheneum_path()?;
     let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
     let agent_name = req.agent_name;
     let project_id = req.project_id;

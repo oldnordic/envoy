@@ -4,8 +4,6 @@ use std::sync::{Arc, Mutex};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
-#[cfg(feature = "atheneum")]
-use axum::routing::post;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use axum::{routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
@@ -126,6 +124,13 @@ impl AppState {
     pub fn with_atheneum(mut self, path: Option<String>) -> Self {
         self.atheneum_path = path;
         self
+    }
+
+    #[cfg(feature = "atheneum")]
+    pub fn require_atheneum_path(&self) -> Result<String> {
+        self.atheneum_path
+            .clone()
+            .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))
     }
 
     /// Async version of with_graph — offloads DB work to the blocking thread pool.
@@ -677,18 +682,7 @@ fn build_base_routes() -> Router<SharedState> {
 
 #[cfg(feature = "atheneum")]
 fn add_atheneum_routes(routes: Router<SharedState>) -> Router<SharedState> {
-    routes
-        .route("/atheneum/discoveries", post(store_discovery))
-        .route("/atheneum/discoveries", get(get_discoveries))
-        .route("/atheneum/handoffs", post(store_handoff))
-        .route("/atheneum/handoffs/pending", get(get_pending_handoff))
-        .route("/atheneum/handoffs/{id}/claim", post(claim_handoff))
-        .route("/atheneum/knowledge", get(get_knowledge))
-        .route(
-            "/atheneum/import-magellan/symbol",
-            post(import_magellan_symbol),
-        )
-        .route("/atheneum/import-magellan/all", post(import_magellan_all))
+    crate::atheneum_bridge::add_atheneum_routes(routes)
 }
 
 /// Build the envoy HTTP router with rate limiting.
