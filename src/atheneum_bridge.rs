@@ -158,6 +158,37 @@ pub struct TokenSavings {
     pub percentage_reduction: f64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ImportMagellanSymbolRequest {
+    pub magellan_db_path: String,
+    pub symbol_name: String,
+    pub agent_name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportMagellanBulkRequest {
+    pub magellan_db_path: String,
+    pub agent_name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportMagellanSymbolResponse {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportMagellanBulkResponse {
+    pub imported_count: i64,
+}
+
 // ============================================================================
 // HTTP Handlers
 // ============================================================================
@@ -1108,6 +1139,89 @@ pub async fn post_ontology_seed(
     Ok(Json(SeedResponse { seeded }))
 }
 
+/// POST /atheneum/import-magellan/symbol — look up one symbol in a magellan
+/// sqlitegraph DB and store it as an atheneum Discovery.
+pub async fn post_import_magellan_symbol(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ImportMagellanSymbolRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
+    let symbol_name = req.symbol_name;
+    let agent_name = req.agent_name;
+    let project_id = req.project_id;
+
+    let result: Option<i64> = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            atheneum
+                .import_symbol_from_magellan(
+                    &magellan_path,
+                    &symbol_name,
+                    &agent_name,
+                    project_id.as_deref(),
+                )
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+
+    if let Some(discovery_id) = result {
+        Ok((
+            axum::http::StatusCode::CREATED,
+            Json(ImportMagellanSymbolResponse {
+                found: true,
+                discovery_id: Some(discovery_id),
+            }),
+        ))
+    } else {
+        Ok((
+            axum::http::StatusCode::OK,
+            Json(ImportMagellanSymbolResponse {
+                found: false,
+                discovery_id: None,
+            }),
+        ))
+    }
+}
+
+/// POST /atheneum/import-magellan/all — bulk-import every Symbol entity
+/// from a magellan sqlitegraph DB into atheneum Discoveries.
+pub async fn post_import_magellan_all(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ImportMagellanBulkRequest>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.atheneum_path.clone();
+    let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
+    let agent_name = req.agent_name;
+    let project_id = req.project_id;
+    let limit = req.limit;
+
+    let count: usize = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            atheneum
+                .import_all_symbols_from_magellan(
+                    &magellan_path,
+                    &agent_name,
+                    project_id.as_deref(),
+                    limit,
+                )
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ImportMagellanBulkResponse {
+            imported_count: count as i64,
+        }),
+    ))
+}
+
 /// Add atheneum bridge routes to an existing router
 pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
     router
@@ -1164,5 +1278,13 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
         .route(
             "/atheneum/ontology/seed",
             axum::routing::post(post_ontology_seed),
+        )
+        .route(
+            "/atheneum/import-magellan/symbol",
+            axum::routing::post(post_import_magellan_symbol),
+        )
+        .route(
+            "/atheneum/import-magellan/all",
+            axum::routing::post(post_import_magellan_all),
         )
 }

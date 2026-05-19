@@ -1009,6 +1009,121 @@ pub async fn seed_ontology(
 }
 
 // ============================================================================
+// Code Bridge (Stage 12b)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ImportMagellanSymbolRequest {
+    pub magellan_db_path: String,
+    pub symbol_name: String,
+    pub agent_name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportMagellanBulkRequest {
+    pub magellan_db_path: String,
+    pub agent_name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportMagellanSymbolResponse {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportMagellanBulkResponse {
+    pub imported_count: i64,
+}
+
+pub async fn import_magellan_symbol(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<ImportMagellanSymbolRequest>,
+) -> Result<(axum::http::StatusCode, Json<ImportMagellanSymbolResponse>), envoy::error::EnvoyError>
+{
+    let atheneum_path = state.atheneum_path.clone();
+    let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
+    let symbol_name = req.symbol_name.clone();
+    let agent_name = req.agent_name.clone();
+    let project_id = req.project_id.clone();
+
+    let result: Option<i64> = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum
+            .import_symbol_from_magellan(
+                &magellan_path,
+                &symbol_name,
+                &agent_name,
+                project_id.as_deref(),
+            )
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+    .map_err(envoy::error::EnvoyError::Atheneum)?;
+
+    if let Some(discovery_id) = result {
+        Ok((
+            axum::http::StatusCode::CREATED,
+            Json(ImportMagellanSymbolResponse {
+                found: true,
+                discovery_id: Some(discovery_id),
+            }),
+        ))
+    } else {
+        Ok((
+            axum::http::StatusCode::OK,
+            Json(ImportMagellanSymbolResponse {
+                found: false,
+                discovery_id: None,
+            }),
+        ))
+    }
+}
+
+pub async fn import_magellan_all(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<ImportMagellanBulkRequest>,
+) -> Result<(axum::http::StatusCode, Json<ImportMagellanBulkResponse>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
+    let agent_name = req.agent_name.clone();
+    let project_id = req.project_id.clone();
+    let limit = req.limit;
+
+    let count: usize = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum
+            .import_all_symbols_from_magellan(
+                &magellan_path,
+                &agent_name,
+                project_id.as_deref(),
+                limit,
+            )
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))?
+    .map_err(envoy::error::EnvoyError::Atheneum)?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ImportMagellanBulkResponse {
+            imported_count: count as i64,
+        }),
+    ))
+}
+
+// ============================================================================
 // Router Builder
 // ============================================================================
 
@@ -1105,6 +1220,14 @@ pub fn build_test_router(state: Arc<TestState>) -> Router {
         .route(
             "/atheneum/ontology/seed",
             axum::routing::post(seed_ontology),
+        )
+        .route(
+            "/atheneum/import-magellan/symbol",
+            axum::routing::post(import_magellan_symbol),
+        )
+        .route(
+            "/atheneum/import-magellan/all",
+            axum::routing::post(import_magellan_all),
         )
         .with_state(state)
 }
