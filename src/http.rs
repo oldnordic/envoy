@@ -528,6 +528,89 @@ pub async fn get_knowledge(
     }))
 }
 
+#[cfg(feature = "atheneum")]
+pub async fn import_magellan_symbol(
+    State(state): State<SharedState>,
+    Json(req): Json<ImportMagellanSymbolRequest>,
+) -> Result<(axum::http::StatusCode, Json<ImportMagellanSymbolResponse>)> {
+    let atheneum_path = state
+        .atheneum_path
+        .as_ref()
+        .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))?
+        .clone();
+    let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
+    let symbol_name = req.symbol_name;
+    let agent_name = req.agent_name;
+    let project_id = req.project_id;
+
+    let result: Option<i64> = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.import_symbol_from_magellan(
+            &magellan_path,
+            &symbol_name,
+            &agent_name,
+            project_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    if let Some(discovery_id) = result {
+        Ok((
+            axum::http::StatusCode::CREATED,
+            Json(ImportMagellanSymbolResponse {
+                found: true,
+                discovery_id: Some(discovery_id),
+            }),
+        ))
+    } else {
+        Ok((
+            axum::http::StatusCode::OK,
+            Json(ImportMagellanSymbolResponse {
+                found: false,
+                discovery_id: None,
+            }),
+        ))
+    }
+}
+
+#[cfg(feature = "atheneum")]
+pub async fn import_magellan_all(
+    State(state): State<SharedState>,
+    Json(req): Json<ImportMagellanBulkRequest>,
+) -> Result<(axum::http::StatusCode, Json<ImportMagellanBulkResponse>)> {
+    let atheneum_path = state
+        .atheneum_path
+        .as_ref()
+        .ok_or_else(|| EnvoyError::Atheneum(anyhow::anyhow!("atheneum not configured")))?
+        .clone();
+    let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
+    let agent_name = req.agent_name;
+    let project_id = req.project_id;
+    let limit = req.limit;
+
+    let count: usize = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        atheneum.import_all_symbols_from_magellan(
+            &magellan_path,
+            &agent_name,
+            project_id.as_deref(),
+            limit,
+        )
+    })
+    .await
+    .map_err(|e| EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ImportMagellanBulkResponse {
+            imported_count: count as i64,
+        }),
+    ))
+}
+
 /// Build the base envoy HTTP routes (without state).
 fn build_base_routes() -> Router<SharedState> {
     Router::new()
@@ -601,6 +684,11 @@ fn add_atheneum_routes(routes: Router<SharedState>) -> Router<SharedState> {
         .route("/atheneum/handoffs/pending", get(get_pending_handoff))
         .route("/atheneum/handoffs/{id}/claim", post(claim_handoff))
         .route("/atheneum/knowledge", get(get_knowledge))
+        .route(
+            "/atheneum/import-magellan/symbol",
+            post(import_magellan_symbol),
+        )
+        .route("/atheneum/import-magellan/all", post(import_magellan_all))
 }
 
 /// Build the envoy HTTP router with rate limiting.
@@ -806,6 +894,41 @@ pub struct TokenSavings {
     pub with_sharing: i64,
     pub saved: i64,
     pub percentage_reduction: f64,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Deserialize)]
+pub struct ImportMagellanSymbolRequest {
+    pub magellan_db_path: String,
+    pub symbol_name: String,
+    pub agent_name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Deserialize)]
+pub struct ImportMagellanBulkRequest {
+    pub magellan_db_path: String,
+    pub agent_name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct ImportMagellanSymbolResponse {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_id: Option<i64>,
+}
+
+#[cfg(feature = "atheneum")]
+#[derive(Debug, Serialize)]
+pub struct ImportMagellanBulkResponse {
+    pub imported_count: i64,
 }
 
 // ── Handlers ──
