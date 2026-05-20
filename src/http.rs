@@ -242,21 +242,33 @@ pub type SharedState = Arc<AppState>;
 
 /// Rate limiting middleware using HybridRateLimiter.
 ///
-/// Extracts agent ID from X-Agent-Id header (if present), otherwise uses
-/// a fallback identifier. Checks rate limits and returns 429 if exceeded.
+/// Requires a registered, active agent. Rejects requests with missing,
+/// unknown, or retired X-Agent-Id with 401. Checks rate limits for known
+/// agents and returns 429 if their bucket is exhausted.
 pub async fn rate_limit_middleware(
     State(state): State<SharedState>,
     request: Request,
     next: Next,
 ) -> Response {
-    // Extract agent ID from header or use fallback
+    // Public endpoints: health checks and agent registration bypass auth.
+    let path = request.uri().path();
+    let is_health = path == "/health" || path == "/stats";
+    let is_registration = path == "/agents" && request.method() == "POST";
+
+    if is_health || is_registration {
+        return next.run(request).await;
+    }
+
     let agent_id = request
         .headers()
         .get("x-agent-id")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous");
+        .unwrap_or("");
 
-    // Check rate limit (with graph reference)
+    if agent_id.is_empty() || !state.agent_registry.is_active(agent_id) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
     let decision = {
         let engine = state.engine.lock().unwrap();
         state
@@ -624,6 +636,10 @@ fn build_base_routes() -> Router<SharedState> {
             "/agents/{agent_id}",
             get(get_agent).delete(disconnect_agent),
         )
+        .route(
+            "/agents/{agent_id}/retire",
+            axum::routing::post(retire_agent),
+        )
         .route("/agents/{agent_id}/messages/pending", get(pending_messages))
         .route("/messages", get(poll_messages).post(send_message))
         .route("/messages/{message_id}", get(get_message))
@@ -927,6 +943,12 @@ pub struct ImportMagellanBulkResponse {
 
 // ── Handlers ──
 
+fn info_with_online(info: &crate::agent::AgentInfo) -> serde_json::Value {
+    let mut v = serde_json::to_value(info).unwrap();
+    v["online"] = serde_json::json!(info.lifecycle == crate::agent::AgentLifecycle::Active);
+    v
+}
+
 async fn register_agent(
     State(state): State<SharedState>,
     Json(req): Json<RegisterRequest>,
@@ -950,7 +972,7 @@ async fn register_agent(
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
-    Ok((axum::http::StatusCode::CREATED, Json(info)))
+    Ok((axum::http::StatusCode::CREATED, Json(info_with_online(&info))))
 }
 
 async fn disconnect_agent(
@@ -975,9 +997,39 @@ async fn disconnect_agent(
     ))
 }
 
+async fn retire_agent(
+    State(state): State<SharedState>,
+    Path(agent_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let state_fb = state.clone();
+    let aid = agent_id.clone();
+    let affected = tokio::task::spawn_blocking(move || {
+        let engine = state_fb.engine.lock().unwrap();
+        let affected = state_fb.agent_registry.retire(engine.graph(), &aid)?;
+        let _ = state_fb
+            .audit_store
+            .log_agent_disconnected(engine.graph(), &aid);
+        Ok::<_, crate::error::EnvoyError>(affected)
+    })
+    .await
+    .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
+    state.circuit_breaker.remove(&agent_id);
+    Ok(Json(
+        serde_json::json!({"retired": true, "affected": affected}),
+    ))
+}
+
 async fn list_agents(State(state): State<SharedState>) -> Result<impl IntoResponse> {
     let agents = state.agent_registry.list_all();
-    Ok(Json(serde_json::json!({"agents": agents})))
+    let agents_json: Vec<serde_json::Value> = agents
+        .iter()
+        .map(|a| {
+            let mut v = serde_json::to_value(a).unwrap();
+            v["online"] = serde_json::json!(a.lifecycle == crate::agent::AgentLifecycle::Active);
+            v
+        })
+        .collect();
+    Ok(Json(serde_json::json!({"agents": agents_json})))
 }
 
 async fn get_agent(
@@ -994,7 +1046,7 @@ async fn get_agent(
         "agent_id": info.agent_id,
         "name": info.name,
         "kind": info.kind,
-        "online": info.online,
+        "online": info.lifecycle == crate::agent::AgentLifecycle::Active,
         "parent_id": info.parent_id,
         "children": child_ids,
     })))
@@ -1065,9 +1117,9 @@ async fn send_message(
     State(state): State<SharedState>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse> {
-    // Verify sender exists and is online (in-memory)
+    // Verify sender exists and is active
     let sender = state.agent_registry.get(&req.from)?;
-    if !sender.online {
+    if sender.lifecycle != crate::agent::AgentLifecycle::Active {
         return Err(EnvoyError::AgentOffline(req.from));
     }
 
@@ -1246,7 +1298,7 @@ async fn ack_message(
 
 async fn health(State(state): State<SharedState>) -> impl IntoResponse {
     let uptime = (chrono::Utc::now() - state.start_time).num_seconds();
-    let online = state.agent_registry.list_online().len();
+    let online = state.agent_registry.list_active().len();
 
     Json(HealthResponse {
         status: "ok",

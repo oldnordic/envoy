@@ -20,9 +20,9 @@ pub struct RateLimitConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            max_tokens: 1000,
-            replenish_rate: 100,
-            burst_size: 5000,
+            max_tokens: 100_000,
+            replenish_rate: 50_000,
+            burst_size: 200_000,
         }
     }
 }
