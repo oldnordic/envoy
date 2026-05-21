@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Envoy Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Envoy Dashboard</h1>
+            <div class="stats" id="stats">
+                <span id="agent-count">Agents: -</span>
+                <span id="discovery-count">Discoveries: -</span>
+                <span id="edge-count">Edges: -</span>
+            </div>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab active" data-view="graph">Graph</button>
+            <button class="tab" data-view="kanban">Kanban</button>
+            <button class="tab" data-view="audit">Audit</button>
+        </nav>
+
+        <main>
+            <section id="graph-view" class="view active">
+                <div id="graph"></div>
+            </section>
+
+            <section id="kanban-view" class="view">
+                <div class="kanban-board">
+                    <div class="column" id="todo-column">
+                        <h2>TODO</h2>
+                        <div class="tasks" id="todo-tasks"></div>
+                    </div>
+                    <div class="column" id="in-progress-column">
+                        <h2>IN PROGRESS</h2>
+                        <div class="tasks" id="in-progress-tasks"></div>
+                    </div>
+                    <div class="column" id="done-column">
+                        <h2>DONE</h2>
+                        <div class="tasks" id="done-tasks"></div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="audit-view" class="view">
+                <div class="audit-timeline" id="audit-timeline"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/dashboard/app.js?v=2"></script>
+    <script src="/dashboard/graph.js?v=2"></script>
+    <script src="/dashboard/kanban.js?v=2"></script>
+    <script src="/dashboard/audit.js?v=2"></script>
+</body>
+</html>

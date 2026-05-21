@@ -14,7 +14,7 @@ All endpoints in this API are cfg-gated behind the `atheneum` feature. They are 
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ENVOY_DB` | No | `/home/feanor/.envoy/server.db` | Path to envoy's SQLite database |
+| `ENVOY_DB` | No | `~/.envoy/server.db` | Path to envoy's SQLite database |
 | `ENVOY_PORT` | No | `9876` | Port for HTTP server |
 | `ATHENEUM_DB` | Yes (for atheneum) | - | Path to atheneum's SQLite database |
 
@@ -22,8 +22,8 @@ All endpoints in this API are cfg-gated behind the `atheneum` feature. They are 
 
 ```ini
 [Service]
-Environment=ENVOY_DB=/home/feanor/.local/share/envoy/agents.db
-Environment=ATHENEUM_DB=/home/feanor/.local/share/envoy/atheneum.db
+Environment=ENVOY_DB=~/.local/share/envoy/agents.db
+Environment=ATHENEUM_DB=~/.local/share/envoy/atheneum.db
 ExecStart=/path/to/envoy serve --port 9876
 ```
 

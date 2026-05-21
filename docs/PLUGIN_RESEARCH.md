@@ -181,7 +181,7 @@ envoy/
 | `~/.hermes/scripts/hermes-inbox-watchdog.sh` (cron) | Hermes plugin `on_session_start` starts listener |
 | `~/.claude/hooks/` read-gate fish scripts | Stay as hooks (they're code-quality, not transport) |
 | `/tmp/claude1_message_monitor.sh` (Monitor tool) | Claude plugin `Notification` hook + listener daemon |
-| `/home/feanor/Projects/messages/scripts/codex-message-monitor.sh` | Codex plugin skill + listener daemon |
+| `/path/to/scripts/codex-message-monitor.sh` | Codex plugin skill + listener daemon |
 | `scripts/envoy-send.mjs` (standalone) | Bundled inside each plugin |
 | `scripts/envoy-listen.mjs` (standalone) | Bundled inside each plugin |
 
