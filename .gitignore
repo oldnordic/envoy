@@ -59,6 +59,15 @@ benchmark_results/
 .hermes/
 .drafts/
 docs/superpowers/
+docs/*retrospective*
+docs/*post-mortem*
+docs/*sprint-review*
+summary.md
+ATHENEUM_INTEGRATION_REPORT.md
+docs/BACKFILL_DATA_ANALYSIS.md
+docs/PLUGIN_RESEARCH.md
+docs/*DESIGN*.md
+.envoy/
 
 # Agent instructions — local only, not for repo
 AGENTS.md
