@@ -105,9 +105,9 @@ fn test_rate_limit_config_default() {
     let config = RateLimitConfig::default();
 
     // Then: Should have sensible defaults
-    assert_eq!(config.max_tokens, 1000);
-    assert_eq!(config.replenish_rate, 100);
-    assert_eq!(config.burst_size, 5000);
+    assert_eq!(config.max_tokens, 100_000);
+    assert_eq!(config.replenish_rate, 50_000);
+    assert_eq!(config.burst_size, 200_000);
 }
 
 #[test]

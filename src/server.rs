@@ -38,7 +38,13 @@ pub async fn run_with_atheneum(
             let state_fb = purge_state.clone();
             let (events_purged, deliveries_purged, agents_purged, circuits_evicted) =
                 tokio::task::spawn_blocking(move || {
-                    let engine = state_fb.engine.lock().unwrap();
+                    let engine = match state_fb.engine.lock() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            eprintln!("purge: lock poisoned: {e}");
+                            return (0, 0, 0, 0);
+                        }
+                    };
                     let ep = state_fb
                         .event_bus
                         .purge_old_events(engine.graph())
@@ -47,7 +53,7 @@ pub async fn run_with_atheneum(
                         .delivery_tracker
                         .purge_deliveries(engine.graph())
                         .unwrap_or(0);
-                    let ap = state_fb.agent_registry.purge_offline(24);
+                    let ap = state_fb.agent_registry.purge_retired(24).unwrap_or(0);
                     let ce = state_fb.circuit_breaker.evict_stale();
                     (ep, dp, ap, ce)
                 })

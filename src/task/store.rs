@@ -98,7 +98,7 @@ impl TaskStore {
         let oldest = tasks
             .into_iter()
             .min_by_key(|t| t.created_at.clone())
-            .unwrap();
+            .ok_or_else(|| EnvoyError::TaskNotFound("no proposed tasks after filter".into()))?;
         self.claim(graph, &oldest.id, agent_id)
     }
 

@@ -39,7 +39,7 @@ pub async fn run_ci_monitor(
 
         // Collect changed runs under lock, then release before async work
         let changed: Vec<(String, String, String, String, String)> = {
-            let mut cache = last_state.lock().unwrap();
+            let mut cache = last_state.lock().unwrap_or_else(|e| e.into_inner());
             let mut changes = Vec::new();
             for run in &runs {
                 let run_id = run["databaseId"].to_string();
@@ -66,7 +66,7 @@ pub async fn run_ci_monitor(
             let project_fb = project.clone();
             let project_fb2 = project.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                let engine = state_fb.engine.lock().unwrap();
+                let engine = state_fb.engine.lock().unwrap_or_else(|e| e.into_inner());
                 let severity = match conclusion.as_str() {
                     "success" => EventSeverity::Info,
                     "failure" => EventSeverity::Blocking,

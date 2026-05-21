@@ -75,7 +75,7 @@ impl CircuitBreaker {
 
     /// Check if delivery is allowed for this agent.
     pub fn check(&self, agent_id: &str) -> CanDeliver {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         let state = states
             .entry(agent_id.to_string())
             .or_insert_with(|| CircuitState::Closed { failures: 0 });
@@ -101,7 +101,7 @@ impl CircuitBreaker {
 
     /// Record a delivery failure. May transition Closed -> Open.
     pub fn record_failure(&self, agent_id: &str) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         let state = states
             .entry(agent_id.to_string())
             .or_insert_with(|| CircuitState::Closed { failures: 0 });
@@ -137,7 +137,7 @@ impl CircuitBreaker {
 
     /// Record a delivery success. Transitions HalfOpen -> Closed.
     pub fn record_success(&self, agent_id: &str) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = states.get_mut(agent_id) {
             if matches!(state, CircuitState::HalfOpen { .. }) {
                 *state = CircuitState::Closed { failures: 0 };
@@ -147,20 +147,20 @@ impl CircuitBreaker {
 
     /// Reset circuit on heartbeat. Any state -> Closed.
     pub fn reset(&self, agent_id: &str) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         states.insert(agent_id.to_string(), CircuitState::Closed { failures: 0 });
     }
 
     /// Remove circuit state for an agent (on disconnect).
     pub fn remove(&self, agent_id: &str) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         states.remove(agent_id);
     }
 
     /// Evict entries that have been Open for longer than 1 hour.
     /// Returns the number of evicted entries.
     pub fn evict_stale(&self) -> usize {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         let cutoff = Utc::now() - chrono::Duration::hours(1);
         let before = states.len();
         states.retain(|_, state| match state {
@@ -172,7 +172,7 @@ impl CircuitBreaker {
 
     /// Get current state for status queries.
     pub fn get_state(&self, agent_id: &str) -> CircuitStatus {
-        let states = self.states.lock().unwrap();
+        let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         match states.get(agent_id) {
             None => CircuitStatus {
                 agent_id: agent_id.to_string(),
@@ -206,7 +206,7 @@ impl CircuitBreaker {
 
     /// List all circuits with non-default state.
     pub fn list_active(&self) -> Vec<CircuitStatus> {
-        let states = self.states.lock().unwrap();
+        let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
         for (agent_id, state) in states.iter() {
             match state {
@@ -291,7 +291,7 @@ mod tests {
 
         // Manually transition to expired open state
         {
-            let mut states = cb.states.lock().unwrap();
+            let mut states = cb.states.lock().unwrap_or_else(|e| e.into_inner());
             states.insert(
                 "agent1".to_string(),
                 CircuitState::Open {
@@ -308,7 +308,7 @@ mod tests {
         let cb = test_breaker();
         // Force half-open
         {
-            let mut states = cb.states.lock().unwrap();
+            let mut states = cb.states.lock().unwrap_or_else(|e| e.into_inner());
             states.insert("agent1".to_string(), CircuitState::HalfOpen { failures: 3 });
         }
         cb.record_success("agent1");
@@ -321,7 +321,7 @@ mod tests {
     fn half_open_failure_reopens() {
         let cb = breaker_with_cooldown();
         {
-            let mut states = cb.states.lock().unwrap();
+            let mut states = cb.states.lock().unwrap_or_else(|e| e.into_inner());
             states.insert("agent1".to_string(), CircuitState::HalfOpen { failures: 3 });
         }
         cb.record_failure("agent1");
@@ -357,7 +357,7 @@ mod tests {
     fn heartbeat_resets_half_open() {
         let cb = breaker_with_cooldown();
         {
-            let mut states = cb.states.lock().unwrap();
+            let mut states = cb.states.lock().unwrap_or_else(|e| e.into_inner());
             states.insert("agent1".to_string(), CircuitState::HalfOpen { failures: 3 });
         }
         cb.reset("agent1");
@@ -410,7 +410,7 @@ mod tests {
 
         // Expire cooldown -> half-open
         {
-            let mut states = cb.states.lock().unwrap();
+            let mut states = cb.states.lock().unwrap_or_else(|e| e.into_inner());
             states.insert(
                 "agent1".to_string(),
                 CircuitState::Open {

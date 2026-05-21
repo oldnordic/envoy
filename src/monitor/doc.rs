@@ -31,7 +31,7 @@ pub async fn run_doc_monitor(
 
         // Check + update under lock, release before async work
         let should_emit = {
-            let mut last = last_checked.lock().unwrap();
+            let mut last = last_checked.lock().unwrap_or_else(|e| e.into_inner());
             if age_seconds > 86400 && *last < now - 86400 {
                 *last = now;
                 true
@@ -46,7 +46,7 @@ pub async fn run_doc_monitor(
             let project_fb = project.clone();
             let project_fb2 = project.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                let engine = state_fb.engine.lock().unwrap();
+                let engine = state_fb.engine.lock().unwrap_or_else(|e| e.into_inner());
                 let severity = if age_seconds > 604800 {
                     EventSeverity::Warning
                 } else {

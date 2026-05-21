@@ -8,13 +8,20 @@ use crate::error::{EnvoyError, Result};
 const KIND_AGENT: &str = "EnvoyAgent";
 const KIND_AGENT_COUNTER: &str = "EnvoyAgentCounter";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLifecycle {
+    Active,
+    Retired,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub agent_id: String,
     pub name: String,
     pub kind: String,
     pub parent_id: Option<String>,
-    pub online: bool,
+    pub lifecycle: AgentLifecycle,
     pub status: Option<crate::status::AgentStatusSnapshot>,
     pub last_heartbeat_at: Option<String>,
 }
@@ -71,7 +78,7 @@ impl AgentRegistry {
                     .get("parent_id")
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                online: false,
+                lifecycle: AgentLifecycle::Retired,
                 status,
                 last_heartbeat_at,
             };
@@ -131,6 +138,7 @@ impl AgentRegistry {
     }
 
     /// Register an agent and return its server-assigned ID.
+    /// Every call creates a fresh agent with a unique ID — IDs are never reused.
     pub fn register(
         &self,
         graph: &sqlitegraph::SqliteGraph,
@@ -138,29 +146,18 @@ impl AgentRegistry {
         kind: &str,
         parent_id: Option<String>,
     ) -> Result<AgentInfo> {
-        {
-            // Reclaim existing agent with same name if it exists (handles restart)
-            let existing_id = {
-                let tree = self.tree.lock().unwrap();
-                tree.agents
-                    .values()
-                    .find(|a| a.name == name)
-                    .map(|a| a.agent_id.clone())
-            };
-            if let Some(ref id) = existing_id {
-                return self.reclaim(graph, id);
-            }
-        }
-
         let info;
         let next_id_val;
         {
-            let mut tree = self.tree.lock().unwrap();
+            let mut tree = self
+                .tree
+                .lock()
+                .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
             let agent_id = if let Some(ref pid) = parent_id {
                 if !tree.agents.contains_key(pid) {
                     return Err(EnvoyError::AgentNotFound(pid.clone()));
                 }
-                if !tree.agents[pid].online {
+                if tree.agents[pid].lifecycle != AgentLifecycle::Active {
                     return Err(EnvoyError::AgentOffline(pid.clone()));
                 }
                 let siblings = tree.children.entry(pid.clone()).or_default();
@@ -176,7 +173,7 @@ impl AgentRegistry {
                 name: name.to_string(),
                 kind: kind.to_string(),
                 parent_id: parent_id.clone(),
-                online: true,
+                lifecycle: AgentLifecycle::Active,
                 status: None,
                 last_heartbeat_at: None,
             };
@@ -194,15 +191,15 @@ impl AgentRegistry {
         Ok(info)
     }
 
-    /// Mark agent and all descendants offline. Returns list of affected IDs.
-    pub fn disconnect(
-        &self,
-        graph: &sqlitegraph::SqliteGraph,
-        agent_id: &str,
-    ) -> Result<Vec<String>> {
+    /// Retire an agent and all descendants. Retired IDs are never reused.
+    /// Returns list of affected IDs.
+    pub fn retire(&self, graph: &sqlitegraph::SqliteGraph, agent_id: &str) -> Result<Vec<String>> {
         let mut affected = Vec::new();
         {
-            let mut tree = self.tree.lock().unwrap();
+            let mut tree = self
+                .tree
+                .lock()
+                .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
             if !tree.agents.contains_key(agent_id) {
                 return Err(EnvoyError::AgentNotFound(agent_id.to_string()));
             }
@@ -210,7 +207,7 @@ impl AgentRegistry {
             let mut stack = vec![agent_id.to_string()];
             while let Some(id) = stack.pop() {
                 if let Some(info) = tree.agents.get_mut(&id) {
-                    info.online = false;
+                    info.lifecycle = AgentLifecycle::Retired;
                     affected.push(id.clone());
                 }
                 if let Some(kids) = tree.children.get(&id) {
@@ -221,7 +218,10 @@ impl AgentRegistry {
 
         for id in &affected {
             let info = {
-                let tree = self.tree.lock().unwrap();
+                let tree = self
+                    .tree
+                    .lock()
+                    .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
                 tree.agents.get(id).cloned()
             };
             if let Some(info) = info {
@@ -232,42 +232,65 @@ impl AgentRegistry {
         Ok(affected)
     }
 
-    fn reclaim(&self, graph: &sqlitegraph::SqliteGraph, agent_id: &str) -> Result<AgentInfo> {
-        let info = {
-            let mut tree = self.tree.lock().unwrap();
-            let info = tree
-                .agents
-                .get_mut(agent_id)
-                .ok_or_else(|| EnvoyError::AgentNotFound(agent_id.to_string()))?;
-            info.online = true;
-            info.status = None;
-            info.last_heartbeat_at = None;
-            info.clone()
-        };
-        Self::persist_agent(graph, &info)?;
-        Ok(info)
+    /// Disconnect agent — marks agent and descendants as Retired.
+    /// Kept for backward compatibility with DELETE /agents/{id}.
+    pub fn disconnect(
+        &self,
+        graph: &sqlitegraph::SqliteGraph,
+        agent_id: &str,
+    ) -> Result<Vec<String>> {
+        self.retire(graph, agent_id)
     }
 
     pub fn get(&self, agent_id: &str) -> Result<AgentInfo> {
-        let tree = self.tree.lock().unwrap();
+        let tree = self
+            .tree
+            .lock()
+            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
         tree.agents
             .get(agent_id)
             .cloned()
             .ok_or_else(|| EnvoyError::AgentNotFound(agent_id.to_string()))
     }
 
-    pub fn list_all(&self) -> Vec<AgentInfo> {
-        let tree = self.tree.lock().unwrap();
-        tree.agents.values().cloned().collect()
+    pub fn list_all(&self) -> Result<Vec<AgentInfo>> {
+        let tree = self
+            .tree
+            .lock()
+            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        Ok(tree.agents.values().cloned().collect())
     }
 
-    pub fn list_online(&self) -> Vec<AgentInfo> {
-        let tree = self.tree.lock().unwrap();
-        tree.agents.values().filter(|a| a.online).cloned().collect()
+    pub fn is_active(&self, agent_id: &str) -> Result<bool> {
+        let tree = self
+            .tree
+            .lock()
+            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        Ok(tree
+            .agents
+            .get(agent_id)
+            .map(|a| a.lifecycle == AgentLifecycle::Active)
+            .unwrap_or(false))
+    }
+
+    pub fn list_active(&self) -> Result<Vec<AgentInfo>> {
+        let tree = self
+            .tree
+            .lock()
+            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        Ok(tree
+            .agents
+            .values()
+            .filter(|a| a.lifecycle == AgentLifecycle::Active)
+            .cloned()
+            .collect())
     }
 
     pub fn get_children(&self, agent_id: &str) -> Result<Vec<AgentInfo>> {
-        let tree = self.tree.lock().unwrap();
+        let tree = self
+            .tree
+            .lock()
+            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
         if !tree.agents.contains_key(agent_id) {
             return Err(EnvoyError::AgentNotFound(agent_id.to_string()));
         }
@@ -283,11 +306,6 @@ impl AgentRegistry {
         Ok(kids)
     }
 
-    pub fn is_online(&self, agent_id: &str) -> bool {
-        let tree = self.tree.lock().unwrap();
-        tree.agents.get(agent_id).map(|a| a.online).unwrap_or(false)
-    }
-
     /// Record a heartbeat, updating the agent's status snapshot and timestamp.
     pub fn heartbeat(
         &self,
@@ -296,13 +314,16 @@ impl AgentRegistry {
         status: crate::status::AgentStatusSnapshot,
     ) -> Result<()> {
         let timestamp = chrono::Utc::now().to_rfc3339();
-        let mut tree = self.tree.lock().unwrap();
+        let mut tree = self
+            .tree
+            .lock()
+            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
         let info = tree
             .agents
             .get_mut(agent_id)
             .ok_or_else(|| EnvoyError::AgentNotFound(agent_id.to_string()))?;
 
-        info.online = true;
+        info.lifecycle = AgentLifecycle::Active;
         info.status = Some(status);
         info.last_heartbeat_at = Some(timestamp.clone());
 
@@ -315,14 +336,18 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Return agents whose last heartbeat is older than threshold_minutes.
-    pub fn get_stale_agents(&self, threshold_minutes: i64) -> Vec<AgentInfo> {
-        let tree = self.tree.lock().unwrap();
+    /// Return active agents whose last heartbeat is older than threshold_minutes.
+    pub fn get_stale_agents(&self, threshold_minutes: i64) -> Result<Vec<AgentInfo>> {
+        let tree = self
+            .tree
+            .lock()
+            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
         let now = chrono::Utc::now();
-        tree.agents
+        Ok(tree
+            .agents
             .values()
             .filter(|info| {
-                if !info.online {
+                if info.lifecycle != AgentLifecycle::Active {
                     return false;
                 }
                 if let Some(ref ts) = info.last_heartbeat_at {
@@ -334,20 +359,23 @@ impl AgentRegistry {
                 true // no heartbeat ever = stale
             })
             .cloned()
-            .collect()
+            .collect())
     }
 
-    /// Remove offline agents that haven't heartbeated in 24+ hours.
+    /// Remove retired agents that haven't heartbeated in 24+ hours.
     /// Returns the number of purged agents.
-    pub fn purge_offline(&self, threshold_hours: i64) -> usize {
-        let mut tree = self.tree.lock().unwrap();
+    pub fn purge_retired(&self, threshold_hours: i64) -> Result<usize> {
+        let mut tree = self
+            .tree
+            .lock()
+            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
         let now = chrono::Utc::now();
         let before = tree.agents.len();
         let stale_ids: Vec<String> = tree
             .agents
             .iter()
             .filter(|(_, info)| {
-                if info.online {
+                if info.lifecycle != AgentLifecycle::Retired {
                     return false;
                 }
                 if let Some(ref ts) = info.last_heartbeat_at {
@@ -368,7 +396,7 @@ impl AgentRegistry {
             });
             tree.agents.remove(id);
         }
-        before - tree.agents.len()
+        Ok(before - tree.agents.len())
     }
 }
 
@@ -377,7 +405,7 @@ fn agent_to_json(info: &AgentInfo) -> serde_json::Value {
         "name": info.name,
         "kind": info.kind,
         "parent_id": info.parent_id,
-        "online": info.online,
+        "lifecycle": info.lifecycle,
         "status": info.status,
         "last_heartbeat_at": info.last_heartbeat_at,
     })
@@ -456,33 +484,66 @@ mod tests {
 
         let affected = reg.disconnect(g, &parent.agent_id).unwrap();
         assert_eq!(affected.len(), 3);
-        assert!(!reg.is_online(&parent.agent_id));
-        assert!(!reg.is_online(&child.agent_id));
+        assert!(!reg.is_active(&parent.agent_id).unwrap());
+        assert!(!reg.is_active(&child.agent_id).unwrap());
     }
 
     #[test]
-    fn subagent_requires_online_parent() {
+    fn subagent_requires_active_parent() {
         let (reg, engine) = test_registry();
         let g = engine.graph();
         let parent = reg.register(g, "claude", "claude", None).unwrap();
         let pid = parent.agent_id.clone();
-        reg.disconnect(g, &pid).unwrap();
+        reg.retire(g, &pid).unwrap();
 
         let err = reg.register(g, "sub", "claude", Some(pid)).unwrap_err();
         assert!(matches!(err, EnvoyError::AgentOffline(_)));
     }
 
     #[test]
-    fn same_name_reclaims_existing_agent() {
+    fn same_name_creates_new_agent() {
         let (reg, engine) = test_registry();
         let g = engine.graph();
         let a1 = reg.register(g, "claude", "claude", None).unwrap();
         let a2 = reg.register(g, "claude", "claude", None).unwrap();
-        assert_eq!(
+        assert_ne!(
             a1.agent_id, a2.agent_id,
-            "same name should reclaim same agent"
+            "same name should create a new agent, not reclaim"
         );
-        assert!(a2.online, "reclaimed agent should be online");
+        assert!(
+            reg.is_active(&a1.agent_id).unwrap(),
+            "original agent should still be active"
+        );
+        assert!(
+            reg.is_active(&a2.agent_id).unwrap(),
+            "new agent should be active"
+        );
+    }
+
+    #[test]
+    fn retire_cascades_to_descendants() {
+        let (reg, engine) = test_registry();
+        let g = engine.graph();
+        let parent = reg.register(g, "claude", "claude", None).unwrap();
+        let child = reg
+            .register(g, "sub", "claude", Some(parent.agent_id.clone()))
+            .unwrap();
+
+        let affected = reg.retire(g, &parent.agent_id).unwrap();
+        assert_eq!(affected.len(), 2);
+        assert!(!reg.is_active(&parent.agent_id).unwrap());
+        assert!(!reg.is_active(&child.agent_id).unwrap());
+    }
+
+    #[test]
+    fn retired_id_cannot_be_reused() {
+        let (reg, engine) = test_registry();
+        let g = engine.graph();
+        let a1 = reg.register(g, "claude", "claude", None).unwrap();
+        reg.retire(g, &a1.agent_id).unwrap();
+        // The retired agent's ID still exists but is not active
+        let info = reg.get(&a1.agent_id).unwrap();
+        assert_eq!(info.lifecycle, AgentLifecycle::Retired);
     }
 
     #[test]
@@ -495,17 +556,20 @@ mod tests {
         let parent = reg.register(g, "claude", "claude", None).unwrap();
         reg.register(g, "sub", "sub", Some(parent.agent_id.clone()))
             .unwrap();
-        reg.disconnect(g, &parent.agent_id).unwrap();
+        reg.retire(g, &parent.agent_id).unwrap();
         drop(reg);
 
         // Second session: reload from same graph
         let reg2 = AgentRegistry::new(g).unwrap();
-        let all = reg2.list_all();
+        let all = reg2.list_all().unwrap();
         assert_eq!(all.len(), 2, "two agents should survive restart");
 
-        // All agents start offline after reload
+        // All agents start retired after reload
         for a in &all {
-            assert!(!a.online, "agents should be offline after restart");
+            assert!(
+                a.lifecycle == AgentLifecycle::Retired,
+                "agents should be retired after restart"
+            );
         }
 
         let parent = all.iter().find(|a| a.agent_id == "id1").unwrap();
@@ -559,26 +623,32 @@ mod tests {
         let updated = registry.get(&info.agent_id).unwrap();
         assert!(updated.last_heartbeat_at.is_some());
         assert_eq!(updated.status.as_ref().unwrap().state.as_str(), "working");
-        assert!(updated.online, "heartbeat must set online=true");
+        assert!(
+            reg_is_active(&registry, &info.agent_id),
+            "heartbeat must keep agent active"
+        );
     }
 
     #[test]
-    fn heartbeat_brings_agent_online_after_restart() {
+    fn heartbeat_reactivates_retired_agent_after_restart() {
         let engine = Engine::open_in_memory().unwrap();
         let graph = engine.graph();
 
         // First session: register an agent
         let reg = AgentRegistry::new(graph).unwrap();
         let info = reg.register(graph, "agent1", "worker", None).unwrap();
-        assert!(info.online, "fresh registration is online");
+        assert_eq!(info.lifecycle, AgentLifecycle::Active);
         drop(reg);
 
-        // Second session: reload — agent starts offline
+        // Second session: reload — agent starts retired
         let reg2 = AgentRegistry::new(graph).unwrap();
         let reloaded = reg2.get(&info.agent_id).unwrap();
-        assert!(!reloaded.online, "agents start offline after reload");
+        assert!(
+            reloaded.lifecycle == AgentLifecycle::Retired,
+            "agents start retired after restart"
+        );
 
-        // Heartbeat brings agent back online
+        // Heartbeat brings agent back to active
         let status = crate::status::AgentStatusSnapshot {
             state: crate::status::AgentState::Working,
             task_id: None,
@@ -591,8 +661,8 @@ mod tests {
 
         let after_hb = reg2.get(&info.agent_id).unwrap();
         assert!(
-            after_hb.online,
-            "heartbeat must bring agent online after restart"
+            after_hb.lifecycle == AgentLifecycle::Active,
+            "heartbeat must bring agent active after restart"
         );
         assert!(after_hb.last_heartbeat_at.is_some());
     }
@@ -605,17 +675,21 @@ mod tests {
 
         let info = registry.register(graph, "stale1", "worker", None).unwrap();
         // Never sends heartbeat — should be stale
-        let stale = registry.get_stale_agents(0); // threshold=0 means immediately stale
+        let stale = registry.get_stale_agents(0).unwrap(); // threshold=0 means immediately stale
         assert!(stale.iter().any(|a| a.agent_id == info.agent_id));
     }
 
     #[test]
-    fn get_stale_agents_excludes_offline() {
+    fn get_stale_agents_excludes_retired() {
         let engine = Engine::open_in_memory().unwrap();
         let graph = engine.graph();
         let registry = AgentRegistry::new(graph).unwrap();
-        // Agent loaded from DB is offline
-        let stale = registry.get_stale_agents(0);
+        // No active agents — empty
+        let stale = registry.get_stale_agents(0).unwrap();
         assert!(stale.is_empty());
+    }
+
+    fn reg_is_active(reg: &AgentRegistry, id: &str) -> bool {
+        reg.is_active(id).unwrap()
     }
 }

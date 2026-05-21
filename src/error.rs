@@ -31,6 +31,9 @@ pub enum EnvoyError {
     #[error("agent offline: {0}")]
     AgentOffline(String),
 
+    #[error("agent retired: {0}")]
+    AgentRetired(String),
+
     #[error("agent already exists: {0}")]
     AgentAlreadyExists(String),
 
@@ -86,6 +89,9 @@ pub enum EnvoyError {
 
     #[error("subscription not found: {0} for project {1}")]
     SubscriptionNotFound(String, String),
+
+    #[error("lock poisoned: {0}")]
+    LockPoisoned(String),
 }
 
 impl IntoResponse for EnvoyError {
@@ -93,6 +99,7 @@ impl IntoResponse for EnvoyError {
         let (status, code) = match &self {
             Self::AgentNotFound(_) => (StatusCode::NOT_FOUND, "AGENT_NOT_FOUND"),
             Self::AgentOffline(_) => (StatusCode::CONFLICT, "AGENT_OFFLINE"),
+            Self::AgentRetired(_) => (StatusCode::GONE, "AGENT_RETIRED"),
             Self::AgentAlreadyExists(_) => (StatusCode::CONFLICT, "AGENT_ALREADY_EXISTS"),
             Self::MessageNotFound(_) => (StatusCode::NOT_FOUND, "MESSAGE_NOT_FOUND"),
             Self::ChannelNotFound(_) => (StatusCode::NOT_FOUND, "CHANNEL_NOT_FOUND"),
@@ -109,6 +116,7 @@ impl IntoResponse for EnvoyError {
             Self::NotTaskClaimant { .. } => (StatusCode::FORBIDDEN, "NOT_TASK_CLAIMANT"),
             Self::ProjectConfigNotFound(_) => (StatusCode::NOT_FOUND, "PROJECT_CONFIG_NOT_FOUND"),
             Self::SubscriptionNotFound(_, _) => (StatusCode::NOT_FOUND, "SUBSCRIPTION_NOT_FOUND"),
+            Self::LockPoisoned(_) => (StatusCode::INTERNAL_SERVER_ERROR, "LOCK_POISONED"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         };
 

@@ -23,6 +23,21 @@ use crate::status::NudgeConfig;
 use crate::task::store::TaskStore;
 use crate::task::{self, TaskState};
 
+/// Lock a `std::sync::Mutex`, recovering from poisoning instead of panicking.
+///
+/// In a long-running server, a poisoned lock means a thread panicked while
+/// holding it. Continuing with potentially inconsistent state is preferable
+/// to crashing on every subsequent request.
+pub(crate) fn recover_lock<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("mutex lock poisoned, recovering: {e}");
+            e.into_inner()
+        }
+    }
+}
+
 /// Registry of active WebSocket senders, keyed by agent_id.
 pub(crate) struct WsRegistry {
     senders: Mutex<HashMap<String, broadcast::Sender<String>>>,
@@ -36,7 +51,7 @@ impl WsRegistry {
     }
 
     fn register(&self, agent_id: &str) -> broadcast::Receiver<String> {
-        let mut senders = self.senders.lock().unwrap();
+        let mut senders = recover_lock(&self.senders);
         if let Some(tx) = senders.get(agent_id) {
             tx.subscribe()
         } else {
@@ -47,7 +62,7 @@ impl WsRegistry {
     }
 
     fn unregister(&self, agent_id: &str) {
-        let mut senders = self.senders.lock().unwrap();
+        let mut senders = recover_lock(&self.senders);
         senders.remove(agent_id);
     }
 
@@ -61,7 +76,7 @@ impl WsRegistry {
             "event": event_type,
             "data": data
         });
-        let senders = self.senders.lock().unwrap();
+        let senders = recover_lock(&self.senders);
         if let Some(tx) = senders.get(agent_id) {
             tx.send(event.to_string()).is_ok()
         } else {
@@ -142,7 +157,7 @@ impl AppState {
     {
         let engine = self.engine.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let engine = engine.lock().unwrap();
+            let engine = recover_lock(&engine);
             f(engine.graph())
         })
         .await
@@ -158,7 +173,7 @@ impl AppState {
     {
         let engine = self.engine.clone();
         tokio::task::spawn_blocking(move || {
-            let engine = engine.lock().unwrap();
+            let engine = recover_lock(&engine);
             f(&engine)
         })
         .await
@@ -170,13 +185,19 @@ impl AppState {
 pub async fn run_nudge_loop(state: Arc<AppState>) {
     loop {
         let interval = {
-            let cfg = state.nudge_config.lock().unwrap();
+            let cfg = recover_lock(&state.nudge_config);
             cfg.check_interval_seconds
         };
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
-        let threshold = state.nudge_config.lock().unwrap().stale_threshold_minutes;
-        let stale = state.agent_registry.get_stale_agents(threshold);
+        let threshold = recover_lock(&state.nudge_config).stale_threshold_minutes;
+        let stale = match state.agent_registry.get_stale_agents(threshold) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("nudge loop: failed to get stale agents: {e}");
+                continue;
+            }
+        };
 
         for agent in &stale {
             let nudge_data = serde_json::json!({
@@ -197,7 +218,7 @@ pub async fn run_nudge_loop(state: Arc<AppState>) {
             let state_fb = state.clone();
             let agent_id_fb = agent.agent_id.clone();
             let (deps, reclaimed) = tokio::task::spawn_blocking(move || {
-                let engine = state_fb.engine.lock().unwrap();
+                let engine = recover_lock(&state_fb.engine);
                 let deps = state_fb
                     .dependency_store
                     .find_by_blocker(engine.graph(), &agent_id_fb)
@@ -265,12 +286,12 @@ pub async fn rate_limit_middleware(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if agent_id.is_empty() || !state.agent_registry.is_active(agent_id) {
+    if agent_id.is_empty() || !state.agent_registry.is_active(agent_id).unwrap_or(false) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
     let decision = {
-        let engine = state.engine.lock().unwrap();
+        let engine = recover_lock(&state.engine);
         state
             .rate_limiter
             .check_rate_limit(engine.graph(), agent_id)
@@ -944,7 +965,8 @@ pub struct ImportMagellanBulkResponse {
 // ── Handlers ──
 
 fn info_with_online(info: &crate::agent::AgentInfo) -> serde_json::Value {
-    let mut v = serde_json::to_value(info).unwrap();
+    // M-ALLOW: AgentInfo derives Serialize with simple field types; this cannot fail
+    let mut v = serde_json::to_value(info).unwrap_or_default();
     v["online"] = serde_json::json!(info.lifecycle == crate::agent::AgentLifecycle::Active);
     v
 }
@@ -955,7 +977,7 @@ async fn register_agent(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let info = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let info = state_fb.agent_registry.register(
             engine.graph(),
             &req.name,
@@ -972,7 +994,10 @@ async fn register_agent(
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
-    Ok((axum::http::StatusCode::CREATED, Json(info_with_online(&info))))
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(info_with_online(&info)),
+    ))
 }
 
 async fn disconnect_agent(
@@ -982,7 +1007,7 @@ async fn disconnect_agent(
     let state_fb = state.clone();
     let aid = agent_id.clone();
     let affected = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let affected = state_fb.agent_registry.disconnect(engine.graph(), &aid)?;
         let _ = state_fb
             .audit_store
@@ -1004,7 +1029,7 @@ async fn retire_agent(
     let state_fb = state.clone();
     let aid = agent_id.clone();
     let affected = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let affected = state_fb.agent_registry.retire(engine.graph(), &aid)?;
         let _ = state_fb
             .audit_store
@@ -1020,11 +1045,12 @@ async fn retire_agent(
 }
 
 async fn list_agents(State(state): State<SharedState>) -> Result<impl IntoResponse> {
-    let agents = state.agent_registry.list_all();
+    let agents = state.agent_registry.list_all()?;
     let agents_json: Vec<serde_json::Value> = agents
         .iter()
         .map(|a| {
-            let mut v = serde_json::to_value(a).unwrap();
+            // M-ALLOW: AgentInfo derives Serialize with simple field types; this cannot fail
+            let mut v = serde_json::to_value(a).unwrap_or_default();
             v["online"] = serde_json::json!(a.lifecycle == crate::agent::AgentLifecycle::Active);
             v
         })
@@ -1058,7 +1084,7 @@ async fn pending_messages(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let messages = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .message_store
             .poll(engine.graph(), &agent_id, 0, 100, true)
@@ -1136,7 +1162,7 @@ async fn send_message(
 
     let state_fb = state.clone();
     let stored = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let stored = state_fb.message_store.store(
             engine.graph(),
             req.msg_type.clone(),
@@ -1190,7 +1216,7 @@ async fn send_message(
                 let state_fb = state.clone();
                 let recipient_fb = recipient.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    let engine = state_fb.engine.lock().unwrap();
+                    let engine = recover_lock(&state_fb.engine);
                     state_fb
                         .audit_store
                         .log_circuit_closed(engine.graph(), &recipient_fb)
@@ -1204,7 +1230,7 @@ async fn send_message(
                     let recipient_fb = recipient.clone();
                     let failures = status.failures;
                     let _ = tokio::task::spawn_blocking(move || {
-                        let engine = state_fb.engine.lock().unwrap();
+                        let engine = recover_lock(&state_fb.engine);
                         state_fb.audit_store.log_circuit_opened(
                             engine.graph(),
                             &recipient_fb,
@@ -1229,7 +1255,7 @@ async fn get_message(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let msg = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.message_store.get(engine.graph(), &message_id)
     })
     .await
@@ -1251,7 +1277,7 @@ async fn poll_messages(
     let state_fb = state.clone();
     let to = query.to.clone();
     let messages = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .message_store
             .poll(engine.graph(), &to, since, limit, include_acked)
@@ -1282,7 +1308,7 @@ async fn ack_message(
     let state_fb = state.clone();
     let mid = message_id.clone();
     let acked = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .message_store
             .ack(engine.graph(), &mid, &req.agent_id)
@@ -1298,7 +1324,11 @@ async fn ack_message(
 
 async fn health(State(state): State<SharedState>) -> impl IntoResponse {
     let uptime = (chrono::Utc::now() - state.start_time).num_seconds();
-    let online = state.agent_registry.list_active().len();
+    let online = state
+        .agent_registry
+        .list_active()
+        .map(|a| a.len())
+        .unwrap_or(0);
 
     Json(HealthResponse {
         status: "ok",
@@ -1310,7 +1340,7 @@ async fn health(State(state): State<SharedState>) -> impl IntoResponse {
 async fn stats(State(state): State<SharedState>) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let total = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .message_store
             .count_all(engine.graph())
@@ -1318,7 +1348,11 @@ async fn stats(State(state): State<SharedState>) -> Result<impl IntoResponse> {
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))?;
-    let registered = state.agent_registry.list_all().len();
+    let registered = state
+        .agent_registry
+        .list_all()
+        .map(|a| a.len())
+        .unwrap_or(0);
 
     Ok(Json(StatsResponse {
         messages_total: total,
@@ -1336,7 +1370,7 @@ async fn heartbeat(
     // Offload DB work to blocking pool — clone Arc<AppState> for the closure
     let state_for_blocking = state.clone();
     let deps = tokio::task::spawn_blocking(move || {
-        let engine = state_for_blocking.engine.lock().unwrap();
+        let engine = recover_lock(&state_for_blocking.engine);
         state_for_blocking
             .agent_registry
             .heartbeat(engine.graph(), &agent_id, status)?;
@@ -1405,7 +1439,7 @@ async fn create_dependency(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let dep = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.dependency_store.create(
             engine.graph(),
             req.dependent_agent,
@@ -1424,7 +1458,7 @@ async fn get_blocker_deps(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let deps = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .dependency_store
             .find_by_blocker(engine.graph(), &agent_id)
@@ -1442,7 +1476,7 @@ async fn get_dependent_deps(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let deps = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .dependency_store
             .find_by_dependent(engine.graph(), &agent_id)
@@ -1460,7 +1494,7 @@ async fn resolve_dependency(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let dep = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.dependency_store.resolve(engine.graph(), &dep_id)
     })
     .await
@@ -1481,13 +1515,17 @@ async fn update_nudge_config(
     State(state): State<SharedState>,
     Json(cfg): Json<crate::status::NudgeConfig>,
 ) -> Result<impl IntoResponse> {
-    let mut current = state.nudge_config.lock().unwrap();
+    let mut current = recover_lock(&state.nudge_config);
     *current = cfg.clone();
     Ok(Json(cfg))
 }
 
 async fn get_nudge_config(State(state): State<SharedState>) -> Result<impl IntoResponse> {
-    let cfg = state.nudge_config.lock().unwrap().clone();
+    let cfg = state
+        .nudge_config
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     Ok(Json(cfg))
 }
 
@@ -1506,7 +1544,7 @@ async fn ingest_hook_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -1551,7 +1589,7 @@ async fn ingest_gate_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -1596,7 +1634,7 @@ async fn ingest_ci_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -1647,7 +1685,7 @@ async fn ingest_doc_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -1691,7 +1729,7 @@ async fn ingest_verify_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -1751,7 +1789,7 @@ async fn query_events(
     let since = params.since.clone();
     let limit = params.limit.unwrap_or(50).min(100);
     let events = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .event_bus
             .query(engine.graph(), &project, since.as_deref(), Some(limit))
@@ -1785,7 +1823,7 @@ async fn query_audit(
     let state_fb = state.clone();
     let limit = params.limit.unwrap_or(50).min(100);
     let events = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.audit_store.query(
             engine.graph(),
             params.agent_id.as_deref(),
@@ -1809,7 +1847,7 @@ async fn query_task_audit(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let events = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .audit_store
             .query(engine.graph(), None, None, Some(&task_id), None, Some(50))
@@ -1830,7 +1868,7 @@ async fn propose_task(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.task_store.propose(
             engine.graph(),
             req.project.clone(),
@@ -1858,7 +1896,7 @@ async fn claim_task(
     let state_fb = state.clone();
     let tid = task_id.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let task = state_fb
             .task_store
             .claim(engine.graph(), &tid, req.agent_id.clone())?;
@@ -1885,7 +1923,7 @@ async fn claim_next_task(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .task_store
             .claim_next(engine.graph(), &req.project, req.agent_id)
@@ -1912,7 +1950,7 @@ async fn update_task_state(
     let state_fb = state.clone();
     let tid = task_id.clone();
     let (task, blocked) = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         let task = state_fb.task_store.update_state(
             engine.graph(),
             &tid,
@@ -1968,7 +2006,7 @@ async fn list_tasks(
     let state_fb = state.clone();
     let project = params.project.clone();
     let tasks = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .task_store
             .list(engine.graph(), &project, filter.as_ref())
@@ -1987,7 +2025,7 @@ async fn get_task(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.task_store.get(engine.graph(), &task_id)
     })
     .await
@@ -2014,7 +2052,7 @@ async fn subscribe_agent(
     let aid = agent_id.to_string();
     let proj = project.to_string();
     tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .subscription_store
             .subscribe(engine.graph(), &aid, &proj)
@@ -2033,7 +2071,7 @@ async fn unsubscribe_agent(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb
             .subscription_store
             .unsubscribe(engine.graph(), &agent_id, &project)
@@ -2050,7 +2088,7 @@ async fn list_subscriptions(
     let state_fb = state.clone();
     let aid = agent_id.clone();
     let subs = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.subscription_store.list(engine.graph(), &aid)
     })
     .await
@@ -2068,7 +2106,7 @@ async fn get_project_config(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let cfg = tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.project_config_store.get(engine.graph(), &project)
     })
     .await
@@ -2085,7 +2123,7 @@ async fn set_project_config(
     cfg.project = project.clone();
     let state_fb = state.clone();
     tokio::task::spawn_blocking(move || {
-        let engine = state_fb.engine.lock().unwrap();
+        let engine = recover_lock(&state_fb.engine);
         state_fb.project_config_store.set(engine.graph(), &cfg)
     })
     .await
@@ -2104,7 +2142,7 @@ async fn ws_handler(
         let state_fb = state.clone();
         let agent_id = agent_id.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            let engine = state_fb.engine.lock().unwrap();
+            let engine = recover_lock(&state_fb.engine);
             state_fb.agent_registry.heartbeat(
                 engine.graph(),
                 &agent_id,
@@ -2132,7 +2170,7 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
         let state_fb = state.clone();
         let agent_id_fb = agent_id.clone();
         let pending = tokio::task::spawn_blocking(move || {
-            let engine = state_fb.engine.lock().unwrap();
+            let engine = recover_lock(&state_fb.engine);
             state_fb
                 .message_store
                 .poll(engine.graph(), &agent_id_fb, 0, 100, true)
@@ -2158,7 +2196,7 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
         let state_fb = state.clone();
         let agent_id_fb = agent_id.clone();
         tokio::task::spawn_blocking(move || {
-            let engine = state_fb.engine.lock().unwrap();
+            let engine = recover_lock(&state_fb.engine);
             let projects = state_fb
                 .subscription_store
                 .list(engine.graph(), &agent_id_fb)
@@ -2200,7 +2238,7 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
         let state_fb = state.clone();
         let agent_id_fb = agent_id.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            let engine = state_fb.engine.lock().unwrap();
+            let engine = recover_lock(&state_fb.engine);
             for msg in &catchup_events {
                 if let Some(eid) = msg
                     .get("data")
@@ -2249,7 +2287,7 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
                         let state_fb = state.clone();
                         let agent_id_fb = agent_id.clone();
                         let replay = tokio::task::spawn_blocking(move || {
-                            let engine = state_fb.engine.lock().unwrap();
+                            let engine = recover_lock(&state_fb.engine);
                             state_fb.message_store.poll(engine.graph(), &agent_id_fb, 0, 100, false)
                         })
                         .await
@@ -2282,7 +2320,7 @@ async fn handle_ws(mut socket: WebSocket, state: SharedState, agent_id: String) 
                                     let state_fb = state.clone();
                                     let agent_id_fb = agent_id.clone();
                                     let accepted = tokio::task::spawn_blocking(move || {
-                                        let engine = state_fb.engine.lock().unwrap();
+                                        let engine = recover_lock(&state_fb.engine);
                                         if let Some(ref st) = status {
                                             state_fb.agent_registry.heartbeat(engine.graph(), &agent_id_fb, st.clone()).is_ok()
                                         } else {
@@ -2334,7 +2372,7 @@ async fn broadcast_to_project(
     let state_c = state.clone();
     let project_owned = project.to_string();
     let subs = match tokio::task::spawn_blocking(move || {
-        let engine = state_c.engine.lock().unwrap();
+        let engine = recover_lock(&state_c.engine);
         state_c
             .subscription_store
             .subscribers(engine.graph(), &project_owned)
@@ -2362,7 +2400,7 @@ async fn broadcast_to_project(
             let state_fb = state.clone();
             let agent_id_fb = agent_id.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                let engine = state_fb.engine.lock().unwrap();
+                let engine = recover_lock(&state_fb.engine);
                 state_fb
                     .audit_store
                     .log_circuit_closed(engine.graph(), &agent_id_fb)
@@ -2379,7 +2417,7 @@ async fn broadcast_to_project(
                 let agent_id_fb = agent_id.clone();
                 let failures = status.failures;
                 let _ = tokio::task::spawn_blocking(move || {
-                    let engine = state_fb.engine.lock().unwrap();
+                    let engine = recover_lock(&state_fb.engine);
                     state_fb
                         .audit_store
                         .log_circuit_opened(engine.graph(), &agent_id_fb, failures)
@@ -2394,7 +2432,7 @@ async fn broadcast_to_project(
     if !delivery_pairs.is_empty() {
         let state_c = state.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            let engine = state_c.engine.lock().unwrap();
+            let engine = recover_lock(&state_c.engine);
             for (agent_id, eid) in &delivery_pairs {
                 let _ = state_c
                     .delivery_tracker
@@ -2410,7 +2448,7 @@ async fn broadcast_to_project(
         let event_type_owned = event_type.to_string();
         let data_clone = data.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            let engine = state_c.engine.lock().unwrap();
+            let engine = recover_lock(&state_c.engine);
             for agent_id in &offline_agents {
                 let _ = state_c.message_store.store_notification(
                     engine.graph(),

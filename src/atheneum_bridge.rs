@@ -332,7 +332,7 @@ pub async fn get_pending_handoff(
                 .get_pending_handoff_in_project(&agent, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;
             Ok(entity.map(|e| {
-                let data = e.data.as_object().unwrap();
+                let data = e.data.as_object().unwrap_or_default();
                 HandoffData {
                     id: e.id,
                     name: e.name,
@@ -420,7 +420,7 @@ pub async fn get_knowledge(
                 .unwrap_or(&vec![])
                 .iter()
                 .map(|v| {
-                    let data = v["data"].as_object().unwrap();
+                    let data = v["data"].as_object().unwrap_or_default();
                     HandoffData {
                         id: v["id"].as_i64().unwrap_or(0),
                         name: v["name"].as_str().unwrap_or("").to_string(),
