@@ -37,6 +37,7 @@ atheneum = { path = "../atheneum" }
 [features]
 default = []
 atheneum = ["dep:atheneum"]
+dashboard = []
 
 [[bin]]
 name = "envoy"
