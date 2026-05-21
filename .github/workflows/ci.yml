@@ -131,3 +131,16 @@ jobs:
             echo "FAIL: No software is production-ready"
             exit 1
           fi
+
+  gitleaks:
+    name: Gitleaks Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install and run Gitleaks
+        run: |
+          curl -sL https://github.com/zricethezav/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz | tar -xz -C /usr/local/bin gitleaks
+          gitleaks detect --verbose --config .gitleaks.toml
