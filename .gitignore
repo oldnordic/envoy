@@ -1,18 +1,97 @@
 /target
-.magellan/
-.claude/settings.local.json
-.remember/
+Cargo.lock
 
-# Internal agent-facing files — not user-facing
+# Worktrees
+.worktrees/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-*
+
+# Cache directories
+.fastembed_cache/
+.cargo-cache/
+.cargo/
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.backup
+*.orig
+*.rej
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Coverage reports
+tarpaulin-report.html
+cobertura.xml
+
+# Benchmark outputs
+*.json.bak
+benchmark_results/
+
+# Claude and internal development files
+.claude/
+.remember/
+.hermes/
+.drafts/
+docs/superpowers/
+
+# Agent instructions — local only, not for repo
 AGENTS.md
 CLAUDE.md
 GEMINI.md
 .mcp.json
 .mcp/
+
+# Magellan index
 .magellan/
-.hermes/
-.claude/
-.drafts/
-docs/superpowers/
+
+# Local config
 /config.local.toml
-.cargo/
+.splice/
+.splice-backup/
+
+# Generated artifacts
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+
+# Build artifacts
+build.txt
+compilation_output.txt
+perf.data
+perf.data.*
+memory
+memory.checkpoint
+memory.wal
+
+# Python build artifacts
+__pycache__/
+*.pyc
+uv.lock
+*.abi3.so
