@@ -332,7 +332,8 @@ pub async fn get_pending_handoff(
                 .get_pending_handoff_in_project(&agent, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;
             Ok(entity.map(|e| {
-                let data = e.data.as_object().unwrap_or_default();
+                let empty = serde_json::Map::new();
+                let data = e.data.as_object().unwrap_or(&empty);
                 HandoffData {
                     id: e.id,
                     name: e.name,
@@ -415,12 +416,14 @@ pub async fn get_knowledge(
                 })
                 .collect();
 
+            let empty_map = serde_json::Map::new();
+            let empty_arr = vec![];
             let handoffs: Vec<HandoffData> = result["handoffs"]
                 .as_array()
-                .unwrap_or(&vec![])
+                .unwrap_or(&empty_arr)
                 .iter()
                 .map(|v| {
-                    let data = v["data"].as_object().unwrap_or_default();
+                    let data = v["data"].as_object().unwrap_or(&empty_map);
                     HandoffData {
                         id: v["id"].as_i64().unwrap_or(0),
                         name: v["name"].as_str().unwrap_or("").to_string(),
