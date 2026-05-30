@@ -32,9 +32,7 @@ const KIND_MESSAGE: &str = "EnvoyMessage";
 
 #[cfg(feature = "atheneum")]
 struct AgentInfo {
-    agent_id: String,
     display_name: String,
-    kind: String,
 }
 
 #[cfg(feature = "atheneum")]
@@ -88,18 +86,7 @@ fn load_agents(graph: &SqliteGraph) -> Result<HashMap<String, AgentInfo>> {
             .unwrap_or("unknown")
             .to_string();
 
-        let kind = entity
-            .data
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("worker")
-            .to_string();
-
-        let info = AgentInfo {
-            agent_id: entity.name.clone(),
-            display_name,
-            kind,
-        };
+        let info = AgentInfo { display_name };
 
         agents.insert(entity.name.clone(), info);
     }
@@ -380,15 +367,9 @@ fn run() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
 
-    let envoy_db = args
-        .get(1)
-        .map(|s| s.as_str())
-        .unwrap_or("envoy.db");
+    let envoy_db = args.get(1).map(|s| s.as_str()).unwrap_or("envoy.db");
 
-    let atheneum_db = args
-        .get(2)
-        .map(|s| s.as_str())
-        .unwrap_or("atheneum.db");
+    let atheneum_db = args.get(2).map(|s| s.as_str()).unwrap_or("atheneum.db");
 
     println!("Configuration:");
     println!("  Envoy DB: {}", envoy_db);

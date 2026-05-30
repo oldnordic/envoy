@@ -24,6 +24,7 @@ ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
 atheneum = { path = "../atheneum", optional = true }
+ureq = { version = "2", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -35,10 +36,14 @@ http-body-util = "0.1"
 atheneum = { path = "../atheneum" }
 
 [features]
-default = []
+default = ["atheneum"]
 atheneum = ["dep:atheneum"]
 dashboard = []
 
 [[bin]]
 name = "envoy"
 path = "src/main.rs"
+
+[[bin]]
+name = "envoy-hook"
+path = "src/bin/hook.rs"
