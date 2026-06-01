@@ -17,6 +17,10 @@
 
 ### Fixed
 
+- **CI and doc monitors now env-gated** — `ENVOY_CI_MONITOR=project,owner/repo,interval` and `ENVOY_DOC_MONITOR=project,repo_path,interval`. Both are off by default; previously hardcoded to poll `oldnordic/magellan` CI and watch `.` on every startup.
+- **Default DB path uses `$XDG_DATA_HOME`/`$HOME`** — no longer hardcoded to `/home/feanor/.envoy/server.db`.
+- **`build_router_unlimited()` includes atheneum routes** — test helper now correctly mounts bridge routes when the `atheneum` feature is active. Fixes 3 failing integration tests.
+- **Removed `dashboard` feature** — `dashboard.rs` (498 LOC) was never compiled or routed. Feature flag, source file, and 3 test files deleted.
 - **SQL parameter ordering bug in `query_sessions`** — Fixed a mismatch where `parent_id` parameters were incorrectly placed when `project` was `None` but `parent_id` was `Some`, causing runtime SQLite parameter count errors.
 - **CI workflow dependency stripping** — `sed` command now correctly comments out both `[dependencies]` and `[dev-dependencies]` `atheneum` path entries to prevent "optional dependency not included in any feature" error during GitHub Actions.
 
