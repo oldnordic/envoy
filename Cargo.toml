@@ -30,7 +30,7 @@ tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
-atheneum = { path = "../atheneum", optional = true }
+atheneum = { version = "0.1.0", optional = true }
 ureq = { version = "2", default-features = false, features = ["json"] }
 
 [dev-dependencies]
@@ -40,8 +40,6 @@ tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.26"
 tempfile = "3"
 http-body-util = "0.1"
-atheneum = { path = "../atheneum" }
-
 [features]
 default = ["atheneum"]
 atheneum = ["dep:atheneum"]
