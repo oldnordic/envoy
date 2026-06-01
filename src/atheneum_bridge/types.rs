@@ -562,3 +562,74 @@ pub struct RecordEventRequest {
 pub struct QueryEventsResponse {
     pub events: Vec<serde_json::Value>,
 }
+
+// ============================================================================
+// Graph Navigation Types
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct GraphEntityResponse {
+    pub id: i64,
+    pub kind: String,
+    pub name: String,
+    pub file_path: Option<String>,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphEdgeResponse {
+    pub id: i64,
+    pub from_id: i64,
+    pub to_id: i64,
+    pub edge_type: String,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NeighborsResponse {
+    pub entity_id: i64,
+    pub outgoing: Vec<GraphEdgeResponse>,
+    pub incoming: Vec<GraphEdgeResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SubgraphViewResponse {
+    pub entry: GraphEntityResponse,
+    pub depth: u32,
+    pub entities: Vec<GraphEntityResponse>,
+    pub edges: Vec<GraphEdgeResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NavigateResponse {
+    pub query: String,
+    pub subgraphs: Vec<SubgraphViewResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphStatsResponse {
+    pub total_entities: i64,
+    pub total_edges: i64,
+    pub entity_counts: Vec<(String, i64)>,
+    pub edge_counts: Vec<(String, i64)>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NavigateQuery {
+    pub q: String,
+    #[serde(default = "default_search_k")]
+    pub k: usize,
+    #[serde(default = "default_navigate_depth")]
+    pub depth: u32,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NeighborsQuery {
+    pub depth: Option<u32>,
+}
+
+fn default_navigate_depth() -> u32 {
+    2
+}

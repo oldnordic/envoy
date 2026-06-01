@@ -7,11 +7,22 @@
 //! - `tasks` — task CRUD + journal handlers
 //! - `actions` — action trace handlers
 //! - `ontology` — ontology class/property handlers
+//! Envoy-Atheneum Bridge HTTP endpoints.
+//!
+//! Split from monolithic `atheneum_bridge.rs` (1774 LOC) into focused modules:
+//! - `types` — request/response structs
+//! - `utils` — shared helper functions
+//! - `discovery` — discovery, handoff, knowledge, search, import handlers
+//! - `tasks` — task CRUD + journal handlers
+//! - `actions` — action trace handlers
+//! - `ontology` — ontology class/property handlers
 //! - `sessions` — session, prompt, tool-call, file-write, commit, test-run, events
+//! - `navigation` — graph entity/edge/neighbors/subgraph/navigate/stats handlers
 
 pub mod actions;
 pub mod discovery;
 pub mod import;
+pub mod navigation;
 pub mod ontology;
 pub mod sessions;
 pub mod tasks;
@@ -155,5 +166,25 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
         .route(
             "/atheneum/events",
             axum::routing::post(sessions::post_event).get(sessions::get_events),
+        )
+        .route(
+            "/atheneum/graph/entities/{id}",
+            axum::routing::get(navigation::get_entity),
+        )
+        .route(
+            "/atheneum/graph/edges/{id}",
+            axum::routing::get(navigation::get_edge),
+        )
+        .route(
+            "/atheneum/graph/entities/{id}/neighbors",
+            axum::routing::get(navigation::get_neighbors),
+        )
+        .route(
+            "/atheneum/graph/navigate",
+            axum::routing::get(navigation::get_navigate),
+        )
+        .route(
+            "/atheneum/graph/stats",
+            axum::routing::get(navigation::get_stats),
         )
 }

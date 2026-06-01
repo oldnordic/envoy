@@ -3,7 +3,7 @@
 ## Installation
 
 ```bash
-git clone https://github.com/feanor12/envoy.git
+git clone https://github.com/oldnordic/envoy.git
 cd envoy
 cargo build --release
 ```
@@ -51,26 +51,57 @@ curl -X POST http://127.0.0.1:9876/agents \
 ```
 
 The server assigns IDs:
-- Root agents: `id1`, `id2`, `id3`, ...
+- Root agents: `id1`, `id2`, `id3`, ... (reuses retired IDs when available)
 - Subagents: `id1.1`, `id1.2`, `id1.1.1`, ... (dot-notation based on parent)
 
 Names are non-unique labels. IDs are the canonical identity.
 
-### Disconnect
+### Idempotent Registration
 
-When an agent disconnects, all descendants are also marked offline:
+Registering an agent with the same name twice returns the existing agent:
 
 ```bash
+# First registration — creates new agent
+curl -X POST http://127.0.0.1:9876/agents \
+  -H "content-type: application/json" \
+  -d '{"name":"hermessub1","kind":"worker"}'
+# → {"agent_id":"id1","is_new":true,"name":"hermessub1",...}
+
+# Second registration — returns existing agent (HTTP 200)
+curl -X POST http://127.0.0.1:9876/agents \
+  -H "content-type: application/json" \
+  -d '{"name":"hermessub1","kind":"worker"}'
+# → {"agent_id":"id1","is_new":false,"name":"hermessub1",...}
+```
+
+The response always includes:
+- `agent_id` — use this in the `x-agent-id` header for all future requests
+- `is_new` — `true` if created, `false` if returning existing
+- `message` — explicit instruction with the assigned ID
+
+### Retiring Agents
+
+When an agent is retired, its numeric ID goes into a reuse pool:
+
+```bash
+# Retire agent id1
 curl -X DELETE http://127.0.0.1:9876/agents/id1
-# → {"disconnected":true,"affected":["id1","id1.1"]}
+# → {"disconnected":true,"affected":["id1"]}
+
+# Register a new agent — reuses the retired ID
+curl -X POST http://127.0.0.1:9876/agents \
+  -H "content-type: application/json" \
+  -d '{"name":"new_agent","kind":"worker"}'
+# → {"agent_id":"id1","is_new":true,...}  (id1 reused!)
 ```
 
-Undelivered messages are NOT lost. The tombstone endpoint preserves them:
+Only explicitly retired agents (via DELETE) have their IDs reused. Agents that
+become offline due to server restart keep their IDs reserved.
 
-```bash
-curl http://127.0.0.1:9876/agents/id1/messages/pending
-# → {"messages":[...], "count":1}
-```
+### Server Restart Behavior
+
+On restart, all agents from the database start as `Retired`. They must
+re-register or send a heartbeat to become `Active` again.
 
 ## Sending Messages
 

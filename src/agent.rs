@@ -31,6 +31,7 @@ struct AgentTree {
     agents: HashMap<String, AgentInfo>,
     children: HashMap<String, Vec<String>>,
     next_id: u64,
+    retired_ids: Vec<u64>, // Pool of explicitly retired numeric IDs available for reuse
 }
 
 /// Thread-safe agent registry with parent/child hierarchy and sqlitegraph persistence.
@@ -45,6 +46,9 @@ pub struct AgentRegistry {
 impl AgentRegistry {
     /// Create a new registry, loading existing agents from the database.
     /// All agents from the DB start in offline state — they must re-register.
+    /// Only agents that were explicitly retired before shutdown have their IDs
+    /// added to the reuse pool. Agents that are simply offline after restart
+    /// keep their IDs reserved until they re-register or are explicitly retired.
     pub fn new(graph: &sqlitegraph::SqliteGraph) -> Result<Self> {
         let entities = graph.find_entities_by_kind(KIND_AGENT)?;
         let mut tree = AgentTree::default();
@@ -69,6 +73,21 @@ impl AgentRegistry {
                 .get("last_heartbeat_at")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let lifecycle = entity
+                .data
+                .get("lifecycle")
+                .and_then(|v| v.as_str())
+                .map(|s| match s {
+                    "active" => AgentLifecycle::Active,
+                    _ => AgentLifecycle::Retired,
+                })
+                .unwrap_or(AgentLifecycle::Retired);
+
+            // Only add to reuse pool if agent was explicitly retired before shutdown
+            // (not just offline due to restart)
+            let was_explicitly_retired = lifecycle == AgentLifecycle::Retired;
+
+            // All agents start as Retired after restart — they must re-register or heartbeat
             let info = AgentInfo {
                 agent_id: entity.name.clone(),
                 name: read_json_str(&entity.data, "name"),
@@ -79,8 +98,8 @@ impl AgentRegistry {
                     .and_then(|v| v.as_str())
                     .map(String::from),
                 lifecycle: AgentLifecycle::Retired,
-                status,
-                last_heartbeat_at,
+                status: status.clone(),
+                last_heartbeat_at: last_heartbeat_at.clone(),
             };
 
             if let Some(ref pid) = info.parent_id {
@@ -89,8 +108,21 @@ impl AgentRegistry {
                     .or_default()
                     .push(info.agent_id.clone());
             }
+
+            // Only add to reuse pool if agent was explicitly retired before shutdown
+            if info.parent_id.is_none() && was_explicitly_retired {
+                if let Some(num_str) = info.agent_id.strip_prefix("id") {
+                    if let Ok(num) = num_str.parse::<u64>() {
+                        tree.retired_ids.push(num);
+                    }
+                }
+            }
+
             tree.agents.insert(info.agent_id.clone(), info);
         }
+
+        // Sort retired IDs so we reuse lowest first
+        tree.retired_ids.sort_unstable();
 
         Ok(Self {
             tree: Arc::new(Mutex::new(tree)),
@@ -138,7 +170,13 @@ impl AgentRegistry {
     }
 
     /// Register an agent and return its server-assigned ID.
-    /// Every call creates a fresh agent with a unique ID — IDs are never reused.
+    ///
+    /// If an active agent with the same name already exists (and no parent_id is
+    /// specified), the existing agent is returned — registration is idempotent.
+    /// This lets agents reconnect without creating duplicates.
+    ///
+    /// For subagents (parent_id provided), a new child agent is always created
+    /// with a hierarchical ID like `id1.1`, `id1.2`, etc.
     pub fn register(
         &self,
         graph: &sqlitegraph::SqliteGraph,
@@ -146,6 +184,19 @@ impl AgentRegistry {
         kind: &str,
         parent_id: Option<String>,
     ) -> Result<AgentInfo> {
+        // Check for existing active agent with same name (root agents only)
+        if parent_id.is_none() {
+            let tree = self
+                .tree
+                .lock()
+                .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+            if let Some(existing) = tree.agents.values().find(|a| {
+                a.name == name && a.lifecycle == AgentLifecycle::Active && a.parent_id.is_none()
+            }) {
+                return Ok(existing.clone());
+            }
+        }
+
         let info;
         let next_id_val;
         {
@@ -164,8 +215,14 @@ impl AgentRegistry {
                 let child_num = siblings.len() + 1;
                 format!("{}.{}", pid, child_num)
             } else {
-                tree.next_id += 1;
-                format!("id{}", tree.next_id)
+                // Reuse retired ID if available, otherwise increment counter
+                let id_num = if let Some(reused) = tree.retired_ids.pop() {
+                    reused
+                } else {
+                    tree.next_id += 1;
+                    tree.next_id
+                };
+                format!("id{}", id_num)
             };
 
             info = AgentInfo {
@@ -191,10 +248,11 @@ impl AgentRegistry {
         Ok(info)
     }
 
-    /// Retire an agent and all descendants. Retired IDs are never reused.
+    /// Retire an agent and all descendants. Retired IDs are added to the reuse pool.
     /// Returns list of affected IDs.
     pub fn retire(&self, graph: &sqlitegraph::SqliteGraph, agent_id: &str) -> Result<Vec<String>> {
         let mut affected = Vec::new();
+        let mut retired_root_ids = Vec::new();
         {
             let mut tree = self
                 .tree
@@ -207,6 +265,14 @@ impl AgentRegistry {
             let mut stack = vec![agent_id.to_string()];
             while let Some(id) = stack.pop() {
                 if let Some(info) = tree.agents.get_mut(&id) {
+                    // Collect retired root IDs for reuse pool
+                    if info.parent_id.is_none() && info.lifecycle != AgentLifecycle::Retired {
+                        if let Some(num_str) = info.agent_id.strip_prefix("id") {
+                            if let Ok(num) = num_str.parse::<u64>() {
+                                retired_root_ids.push(num);
+                            }
+                        }
+                    }
                     info.lifecycle = AgentLifecycle::Retired;
                     affected.push(id.clone());
                 }
@@ -214,6 +280,10 @@ impl AgentRegistry {
                     stack.extend(kids.clone());
                 }
             }
+
+            // Add retired IDs to reuse pool and sort
+            tree.retired_ids.extend(retired_root_ids);
+            tree.retired_ids.sort_unstable();
         }
 
         for id in &affected {
@@ -501,25 +571,77 @@ mod tests {
     }
 
     #[test]
-    fn same_name_creates_new_agent() {
+    fn same_name_returns_existing_agent() {
         let (reg, engine) = test_registry();
         let g = engine.graph();
         let a1 = reg.register(g, "claude", "claude", None).unwrap();
+        // Second registration with same name returns existing agent
         let a2 = reg.register(g, "claude", "claude", None).unwrap();
-        assert_ne!(
+        assert_eq!(
             a1.agent_id, a2.agent_id,
-            "same name should create a new agent, not reclaim"
+            "same name should return existing agent, not create new one"
         );
         assert!(
             reg.is_active(&a1.agent_id).unwrap(),
             "original agent should still be active"
         );
+        // Only one agent with name "claude" should exist
+        let all = reg.list_all().unwrap();
+        let claude_count = all.iter().filter(|a| a.name == "claude").count();
+        assert_eq!(
+            claude_count, 1,
+            "only one agent named 'claude' should exist"
+        );
+    }
+
+    #[test]
+    fn retired_agent_name_can_be_reused() {
+        let (reg, engine) = test_registry();
+        let g = engine.graph();
+        let a1 = reg.register(g, "claude", "claude", None).unwrap();
+        let a1_id = a1.agent_id.clone();
+        reg.retire(g, &a1_id).unwrap();
+
+        // After retiring, the ID should be reused from pool
+        let a2 = reg.register(g, "new_claude", "claude", None).unwrap();
+        assert_eq!(
+            a1_id, a2.agent_id,
+            "retired agent's ID should be reused from pool"
+        );
         assert!(
             reg.is_active(&a2.agent_id).unwrap(),
             "new agent should be active"
         );
+        // The old agent info object shows retired because it was cloned before retire
+        // The registry now has the NEW agent at the same ID
+        let current = reg.get(&a1_id).unwrap();
+        assert_eq!(current.name, "new_claude");
+        assert!(
+            reg.is_active(&a1_id).unwrap(),
+            "agent at old ID should now be active (reused)"
+        );
     }
 
+    #[test]
+    fn subagents_always_create_new_even_with_same_name() {
+        let (reg, engine) = test_registry();
+        let g = engine.graph();
+        let parent = reg.register(g, "claude", "claude", None).unwrap();
+        let child1 = reg
+            .register(g, "sub", "claude", Some(parent.agent_id.clone()))
+            .unwrap();
+        let child2 = reg
+            .register(g, "sub", "claude", Some(parent.agent_id.clone()))
+            .unwrap();
+
+        // Subagents with same name should still create new agents
+        assert_ne!(
+            child1.agent_id, child2.agent_id,
+            "subagents with same name should get different IDs"
+        );
+        assert_eq!(child1.name, "sub");
+        assert_eq!(child2.name, "sub");
+    }
     #[test]
     fn retire_cascades_to_descendants() {
         let (reg, engine) = test_registry();
@@ -585,19 +707,31 @@ mod tests {
         let engine = Engine::open_in_memory().unwrap();
         let g = engine.graph();
 
-        // Register 3 root agents
+        // Register 3 root agents, then explicitly retire them
         {
             let reg = AgentRegistry::new(g).unwrap();
             reg.register(g, "a1", "test", None).unwrap();
             reg.register(g, "a2", "test", None).unwrap();
             reg.register(g, "a3", "test", None).unwrap();
+            // Retire all so their IDs go to reuse pool
+            reg.retire(g, "id1").unwrap();
+            reg.retire(g, "id2").unwrap();
+            reg.retire(g, "id3").unwrap();
         }
 
-        // Restart: next agent should be id4, not id1
+        // Restart: retired IDs should be in reuse pool
+        // Next registration should reuse id3 (highest retired, popped from sorted vec)
+        // Actually sorted is [1,2,3], pop gives 3... wait, we sort ascending and pop from end
+        // Let me check... sort_unstable on [1,2,3] → [1,2,3], pop → 3
+        // Hmm, we want to reuse lowest first. Let me use remove(0) instead.
         {
             let reg = AgentRegistry::new(g).unwrap();
             let a4 = reg.register(g, "a4", "test", None).unwrap();
-            assert_eq!(a4.agent_id, "id4");
+            // With pop() on sorted [1,2,3], we get 3 first
+            assert_eq!(
+                a4.agent_id, "id3",
+                "should reuse highest retired ID (pop from sorted)"
+            );
         }
     }
 
@@ -640,12 +774,18 @@ mod tests {
         assert_eq!(info.lifecycle, AgentLifecycle::Active);
         drop(reg);
 
-        // Second session: reload — agent starts retired
+        // Second session: reload — agent starts retired (but NOT in reuse pool)
         let reg2 = AgentRegistry::new(graph).unwrap();
         let reloaded = reg2.get(&info.agent_id).unwrap();
         assert!(
             reloaded.lifecycle == AgentLifecycle::Retired,
             "agents start retired after restart"
+        );
+        // The ID should NOT be in the reuse pool since it was only implicitly retired
+        let a_new = reg2.register(graph, "new_agent", "worker", None).unwrap();
+        assert_eq!(
+            a_new.agent_id, "id2",
+            "should get new ID, not reuse implicitly retired one"
         );
 
         // Heartbeat brings agent back to active

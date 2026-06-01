@@ -265,6 +265,263 @@ Queries atheneum for all knowledge about a target, including token savings.
 
 ---
 
+### 7. Query Sessions
+
+Retrieves recent sessions, optionally filtered by project or parent session.
+
+**Endpoint:** `GET /atheneum/sessions?project<project>&last<N>&parent_id<parent>`
+
+**Query Parameters:**
+| Parameter | Required | Type | Description |
+|-----------|----------|------|-------------|
+| `project` | No | string | Filter to a specific project. Omit for cross-project queries. |
+| `last` | No | integer | Max sessions to return (default: 5). |
+| `parent_id` | No | string | Filter to children of a specific parent session. |
+
+**Response (200 OK):**
+```json
+[
+  {
+    "session_id": "sess-abc-123",
+    "project": "envoy",
+    "git_branch": "main",
+    "trigger": "user-request",
+    "started_at": "2026-06-01T10:00:00Z",
+    "ended_at": "2026-06-01T10:15:00Z",
+    "exit_status": "success",
+    "tool_call_count": 12,
+    "file_write_count": 3,
+    "commit_count": 1,
+    "parent_session_id": null,
+    "last_tool": "bash",
+    "last_tool_summary": "cargo test --lib passed",
+    "total_input_tokens": 45000,
+    "total_output_tokens": 12000,
+    "total_cost_usd": 0.015
+  }
+]
+```
+
+**Error Responses:**
+- `500` — Atheneum not configured or database error
+
+---
+
+### 8. Record Event
+
+Stores a generic event in the atheneum event log for cross-session auditing.
+
+**Endpoint:** `POST /atheneum/events`
+
+**Request:**
+```json
+{
+  "session_id": "sess-abc-123",
+  "event_type": "intent_before_action",
+  "entity_id": "graph::query_sessions",
+  "payload": {
+    "intent": "fix SQL param ordering",
+    "rationale": "prevent runtime mismatch when project filter is omitted"
+  }
+}
+```
+
+**Response (201 Created):**
+- Empty body with `201 Created` status.
+
+**Error Responses:**
+- `500` — Atheneum not configured or database error
+- `422` — Invalid JSON or missing required fields
+
+---
+
+### 9. Query Events
+
+Retrieves generic events from the event log, filtered by session and/or event type.
+
+**Endpoint:** `GET /atheneum/events?session_id<>&event_type<>&limit<N>`
+
+**Query Parameters:**
+| Parameter | Required | Type | Description |
+|-----------|----------|------|-------------|
+| `session_id` | No | string | Filter events belonging to a specific session. |
+| `event_type` | No | string | Filter to a specific event type (e.g. `intent_before_action`). |
+| `limit` | No | integer | Max events to return (default: 100). |
+
+**Response (200 OK):**
+```json
+{
+  "events": [
+    {
+      "id": 1,
+      "session_id": "sess-abc-123",
+      "event_type": "intent_before_action",
+      "entity_id": "graph::query_sessions",
+      "payload": { ... },
+      "recorded_at": "2026-06-01T10:05:00Z"
+    }
+  ]
+}
+```
+
+**Error Responses:**
+- `500` — Atheneum not configured or database error
+
+---
+
+### 10. Get Entity
+
+Read a single graph entity by its ID.
+
+**Endpoint:** `GET /atheneum/graph/entities/{id}`
+
+**Path Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `id` | integer | Graph entity ID |
+
+**Response (200 OK):**
+```json
+{
+  "id": 42,
+  "kind": "Discovery",
+  "name": "claude1: build_router",
+  "file_path": null,
+  "data": { ... }
+}
+```
+
+**Errors:**
+- `404` — Entity not found
+- `500` — Database error
+
+---
+
+### 11. Get Edge
+
+Read a single graph edge by its ID.
+
+**Endpoint:** `GET /atheneum/graph/edges/{id}`
+
+**Path Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `id` | integer | Graph edge ID |
+
+**Response (200 OK):**
+```json
+{
+  "id": 7,
+  "from_id": 42,
+  "to_id": 1,
+  "edge_type": "performed_by",
+  "data": { ... }
+}
+```
+
+**Errors:**
+- `404` — Edge not found
+- `500` — Database error
+
+---
+
+### 12. Get Neighbors
+
+Return edges connected to an entity. Optionally expands to a full subgraph of depth `N` hops.
+
+**Endpoint:** `GET /atheneum/graph/entities/{id}/neighbors?depth=N`
+
+**Query Parameters:**
+| Parameter | Required | Type | Default | Description |
+|-----------|----------|------|---------|-------------|
+| `depth` | No | integer | `0` | `0`=edges only, `>0`=BFS subgraph of N hops |
+
+**Response (depth=0):**
+```json
+{
+  "entity_id": 42,
+  "outgoing": [ { "id": 7, "from_id": 42, ... } ],
+  "incoming": [ { "id": 12, "to_id": 42, ... } ]
+}
+```
+
+**Response (depth>0):**
+Full `SubgraphView` (see section 14).
+
+**Errors:**
+- `500` — Database error
+
+---
+
+### 13. Navigate
+
+**Semantic search + graph walk** — the primary entry point for LLM agents.
+
+Performs approximate nearest neighbor (HNSW) search for the query, then walks each found entry point out to `depth` hops, returning all subgraph views combined.
+
+**Endpoint:** `GET /atheneum/graph/navigate?query=X[&k=N&depth=D&project=P]`
+
+**Query Parameters:**
+| Parameter | Required | Type | Default | Description |
+|-----------|----------|------|---------|-------------|
+| `query` | Yes | string | — | Natural language query (e.g. "router construction") |
+| `k` | No | integer | `5` | Max semantic entry points |
+| `depth` | No | integer | `2` | BFS depth from each hit |
+| `project` | No | string | — | Filter discoveries to a project |
+
+**Response (200 OK):**
+```json
+{
+  "query": "router construction",
+  "subgraphs": [
+    {
+      "entry": { "id": 42, "kind": "Discovery", ... },
+      "depth": 2,
+      "entities": [ ... ],
+      "edges": [ ... ]
+    }
+  ]
+}
+```
+
+**Notes:**
+- Discoveries are auto-indexed on write; no manual rebuild needed.
+- If no hits, returns empty `subgraphs` array.
+
+**Errors:**
+- `500` — Database error
+
+---
+
+### 14. Graph Stats
+
+Topological summary of the atheneum graph.
+
+**Endpoint:** `GET /atheneum/graph/stats`
+
+**Response (200 OK):**
+```json
+{
+  "total_entities": 156,
+  "total_edges": 89,
+  "entity_counts": [
+    ["Discovery", 42],
+    ["Session", 30],
+    ["Agent", 5]
+  ],
+  "edge_counts": [
+    ["performed_by", 50],
+    ["created", 20],
+    ["verified_by", 15]
+  ]
+}
+```
+
+**Errors:**
+- `500` — Database error
+
+---
+
 ## Health Check
 
 **Endpoint:** `GET /health`

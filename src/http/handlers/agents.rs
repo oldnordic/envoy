@@ -16,8 +16,20 @@ pub(crate) async fn register_agent(
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
-    let info = tokio::task::spawn_blocking(move || {
+    let (info, is_new) = tokio::task::spawn_blocking(move || {
         let engine = recover_lock(&state_fb.engine);
+        let existing = state_fb
+            .agent_registry
+            .list_active()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|a| a.name == req.name && a.parent_id.is_none() && req.parent_id.is_none());
+
+        if let Some(existing) = existing {
+            // Idempotent registration — return existing agent
+            return Ok::<_, crate::error::EnvoyError>((existing, false));
+        }
+
         let info = state_fb.agent_registry.register(
             engine.graph(),
             &req.name,
@@ -30,14 +42,25 @@ pub(crate) async fn register_agent(
             &info.name,
             &info.kind,
         );
-        Ok::<_, crate::error::EnvoyError>(info)
+        Ok((info, true))
     })
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(info_with_online(&info)),
-    ))
+
+    let status = if is_new {
+        axum::http::StatusCode::CREATED
+    } else {
+        axum::http::StatusCode::OK
+    };
+
+    let mut response = info_with_online(&info);
+    response["message"] = serde_json::json!(format!(
+        "Use agent_id '{}' for all future requests. Include it in the x-agent-id header.",
+        info.agent_id
+    ));
+    response["is_new"] = serde_json::json!(is_new);
+
+    Ok((status, Json(response)))
 }
 
 pub(crate) async fn disconnect_agent(

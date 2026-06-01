@@ -104,3 +104,6 @@ __pycache__/
 *.pyc
 uv.lock
 *.abi3.so
+docs/DASHBOARD_DESIGN.md
+docs/DASHBOARD_IMPLEMENTATION_PLAN.md
+docs/TRANSFORMATION_MAPPING.md

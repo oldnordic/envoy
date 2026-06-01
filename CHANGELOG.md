@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`POST /atheneum/events`** — Generic event logging endpoint. Accepts `session_id`, `event_type`, `entity_id`, and arbitrary JSON `payload`. Persists to the `event_log` table for cross-session auditing.
+- **`GET /atheneum/sessions`** now supports **cross-project queries**. The `project` query parameter is now optional (`Option<String>`). When omitted, returns sessions from all projects.
+- **`GET /atheneum/events`** — Query generic events. Supports filtering by `session_id`, `event_type`, and `limit`.
+- **Graph navigation endpoints** — New `GET /atheneum/graph/*` routes:
+  - `GET /atheneum/graph/entities/{id}` — read entity by ID
+  - `GET /atheneum/graph/edges/{id}` — read edge by ID
+  - `GET /atheneum/graph/entities/{id}/neighbors?depth=N` — one-hop edges (depth=0) or BFS subgraph (depth>0)
+  - `GET /atheneum/graph/navigate?query=X[&k=N&depth=D&project=P]` — semantic search + graph walk (the primary LLM tool)
+  - `GET /atheneum/graph/stats` — topological summary (entity + edge counts by kind/type)
+- **Semantic search auto-index** — `GET /atheneum/search` no longer rebuilds the HNSW index on every request. Discoveries are auto-indexed on write in `store_discovery()`.
+
+### Fixed
+
+- **SQL parameter ordering bug in `query_sessions`** — Fixed a mismatch where `parent_id` parameters were incorrectly placed when `project` was `None` but `parent_id` was `Some`, causing runtime SQLite parameter count errors.
+- **CI workflow dependency stripping** — `sed` command now correctly comments out both `[dependencies]` and `[dev-dependencies]` `atheneum` path entries to prevent "optional dependency not included in any feature" error during GitHub Actions.
+
+### Agent Registry (Breaking)
+
+- **Idempotent registration** — `POST /agents` with the same name no longer creates duplicates. If an active agent with that name exists, the existing agent is returned with `is_new: false` and HTTP 200.
+- **Retired ID reuse pool** — When an agent is explicitly retired (via `DELETE /agents/{id}`), its numeric ID is added to a reuse pool. New registrations reuse the lowest available retired ID instead of incrementing forever. This prevents ID exhaustion in long-running deployments.
+- **Server restart lifecycle** — On restart, all agents loaded from the database start as `Retired`. They must re-register or send a heartbeat to become `Active` again. Only agents that were explicitly retired before shutdown have their IDs added to the reuse pool; agents that were simply offline due to restart keep their IDs reserved.
+- **Server-assigned identification** — Registration response now includes:
+  - `agent_id` — the canonical ID to use for all future requests
+  - `is_new` — `true` if created, `false` if returning existing
+  - `message` — explicit instruction: "Use agent_id 'X' for all future requests. Include it in the x-agent-id header."
+
 ### Architecture
 
 - **Split `src/http.rs` (1968 LOC) into focused modules** — `src/http/` directory:

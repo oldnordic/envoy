@@ -1,119 +1,194 @@
-# Envoy — Message/Coordination Server for AI Coding Agents
+# Envoy
 
-HTTP+JSON coordination server built on [sqlitegraph](https://crates.io/crates/sqlitegraph).
-Replaces file-based message passing with real-time structured messaging, agent identity
-management, and a subagent handoff protocol.
+HTTP+JSON coordination server for AI coding agents. Provides agent identity, structured messaging, session accountability, and knowledge persistence via the [atheneum](https://github.com/oldnordic/atheneum) graph database.
+
+Built on [sqlitegraph](https://crates.io/crates/sqlitegraph). Designed for use with [grounded-coding](https://github.com/oldnordic/grounded-coding).
+
+## Install
+
+```bash
+cargo install envoy   # installs both `envoy` server and `envoy-hook` binary
+```
+
+Or via the grounded-coding installer (recommended — also installs magellan, llmgrep, mirage, splice):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oldnordic/grounded-coding/master/install.sh | sh
+```
 
 ## Quick Start
 
 ```bash
-# Build
-cargo build
+# Start server (default: 127.0.0.1:9876)
+envoy serve --port 9876
 
-# Run (defaults: 127.0.0.1:9876, db at ~/.envoy/server.db)
-cargo run
+# Custom database path
+ATHENEUM_DB=~/.local/share/atheneum/atheneum.db envoy serve
 
-# Custom port and database
-ENVOY_PORT=9876 ENVOY_DB=/path/to/envoy.db cargo run
+# Health check
+curl http://127.0.0.1:9876/health
+```
 
-# Run tests
-cargo test
+As a systemd user service (Linux):
+
+```bash
+systemctl --user start envoy
+systemctl --user status envoy
 ```
 
 ## What It Does
 
-Envoy sits between AI coding agents (Claude, Hermes, subagents) and provides:
+Envoy gives AI coding agents what LLM vendors don't ship:
 
-- **Agent registry** — Agents register to get server-assigned IDs with parent/child
-  hierarchy. Subagents get dot-notation IDs (`id1.1`, `id1.1.1`).
-- **Direct messaging** — Agents send structured messages to each other via HTTP.
-  Messages get sequence IDs and are persisted in SQLite.
-- **Real-time push** — WebSocket connections push messages to connected agents
-  instantly, with catch-up delivery on connect.
-- **Handoff protocol** — Subagents hand work back to parents with structured data:
-  completion status, context remaining, what was done/stubbed, verification state,
-  and a magellan trace proving what code changed.
-- **Cascade disconnect** — Disconnecting a parent agent marks all descendants
-  offline. Undelivered messages are preserved as tombstones.
+| Missing capability | Envoy provides |
+|-------------------|----------------|
+| No persistent identity | Named agents (`claude-main`, `claudesub1`) with parent/child hierarchy |
+| No cross-session memory | Session history queryable by project — `GET /atheneum/sessions?project=X&last=3` |
+| No audit trail | Every tool call logged: who, what, input/output summary, latency |
+| No subagent accountability | Parent/child sessions, handover notes written on stop |
+| No knowledge sharing | Discoveries, decisions, task state persisted across sessions |
+| No multi-agent coordination | Pub/sub messaging, tasks, circuit breakers, dependencies |
 
-## Architecture
+## Core Concepts
 
-```
-Agent (Claude) ──HTTP POST /messages──▶  ┌──────────────┐  ──WebSocket push──▶  Agent (Hermes)
-Agent (Sub)    ──handoff message─────▶  │    envoy      │  ──poll GET────────▶  Agent (Parent)
-                                        │  SQLite DB     │
-                                        └──────────────┘
-```
+### Agent Identity
 
-```
-src/
-├── lib.rs          # Public API re-exports
-├── main.rs         # Binary entry point
-├── error.rs        # EnvoyError enum + IntoResponse
-├── types.rs        # Channel, Event, EventPayload, Subscription, EngineStats
-├── engine.rs       # Core pub/sub engine (wraps sqlitegraph)
-├── agent.rs        # AgentRegistry with parent/child hierarchy
-├── message.rs      # MessageEnvelope, Part, HandoffData, MessageStore
-├── http/           # Axum HTTP + WebSocket handlers (split into focused modules)
-│   ├── state.rs    # AppState, SharedState, WsRegistry
-│   ├── router.rs   # Route table construction
-│   ├── types.rs    # Request/response structs
-│   ├── handlers/   # HTTP handler functions (agents, messages, tasks, events, audit)
-│   ├── middleware.rs # Rate limiting
-│   └── ws.rs       # WebSocket handler and broadcast logic
-└── server.rs       # Server startup (DB open + axum::serve)
+Agents register on session start and get a server-assigned ID:
+
+```bash
+curl -X POST http://127.0.0.1:9876/agents \
+  -H "content-type: application/json" \
+  -d '{"name":"claude-main","kind":"claude"}'
+# → {"agent_id":"id1","name":"claude-main","is_new":true,...}
 ```
 
-### Key Types
+IDs are hierarchical: root agents get `id1`, `id2`, ... Subagents get `id1.1`, `id1.2`, `id1.1.1`, etc. Explicitly retired IDs are reused. All calls require `X-Agent-Id` header.
 
-| Type | Purpose |
-|------|---------|
-| `MessageEnvelope` | Universal message wrapper: type, from, to, task_id, context_id, sequence_id, parts |
-| `Part` / `PartContent` | Content parts: `Text`, `Data` (JSON), or `Url` |
-| `HandoffData` | Subagent-to-parent handoff: completion status, context %, verification state, magellan trace |
-| `MessageType` | `direct`, `handoff`, `heartbeat`, `system` |
-| `AgentInfo` | Agent identity: agent_id, name, kind, parent_id, online |
-| `CompletionStatus` | `DONE`, `DONE_WITH_CONCERNS`, `BLOCKED`, `NEEDS_CONTEXT` |
+### Session Accountability
 
-### Message Limits
+Every Claude Code session writes to envoy automatically via `envoy-hook`:
 
-| Limit | Value |
-|-------|-------|
-| Max parts per message | 20 |
-| Max text part size | 1 MB |
-| Max poll limit | 100 |
-| WebSocket broadcast channel | 256 messages |
+```
+SessionStart   → POST /atheneum/sessions        (project, branch, model, parent)
+PostToolUse    → POST /atheneum/tool-calls       (tool, input summary, output summary, latency)
+SubagentStop   → POST /atheneum/sessions/{id}/handover  (git diff, outcome)
+Stop           → PATCH /atheneum/sessions/{id}   (tool count, cost, exit status)
+```
+
+Query prior state before acting:
+
+```bash
+curl "http://127.0.0.1:9876/atheneum/sessions?project=my-project&last=3"
+```
+
+Returns compact session history: branch, tool call count, file writes, last action.
+
+### Knowledge Persistence
+
+Store discoveries so future agents don't re-discover:
+
+```bash
+curl -X POST http://127.0.0.1:9876/atheneum/discoveries \
+  -H "X-Agent-Id: $GROUNDED_AGENT_ID" \
+  -H "content-type: application/json" \
+  -d '{"agent":"claude","discovery_type":"Bug","target":"query_sessions",
+       "metadata":{"file":"evidence.rs","line":547,"why":"anonymous ? params required"}}'
+```
+
+Query on next session start:
+
+```bash
+curl "http://127.0.0.1:9876/atheneum/context?project=my-project&limit=6"
+```
 
 ## API Overview
 
+### Agent Coordination
+
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/agents` | Register a new agent |
+| `POST` | `/agents` | Register agent (idempotent — returns existing if name matches) |
 | `GET` | `/agents` | List all agents |
-| `GET` | `/agents/{id}` | Get agent detail with children |
-| `DELETE` | `/agents/{id}` | Disconnect agent (cascades) |
-| `GET` | `/agents/{id}/messages/pending` | Tombstone: undelivered messages |
-| `POST` | `/messages` | Send a message |
-| `GET` | `/messages?to=&since=&limit=` | Poll messages for recipient |
-| `GET` | `/messages/{id}` | Get a single message |
-| `GET` | `/ws/{agent_id}` | WebSocket upgrade |
-| `GET` | `/health` | Health check + uptime |
-| `GET` | `/stats` | Message count + agent count |
+| `GET` | `/agents/{id}` | Get agent + children |
+| `DELETE` | `/agents/{id}` | Retire agent (cascades to children, ID goes to reuse pool) |
+| `POST` | `/heartbeat` | Keep agent alive |
+| `POST` | `/messages` | Send direct message |
+| `GET` | `/messages` | Poll messages |
+| `GET` | `/ws/{agent_id}` | WebSocket push |
+| `GET` | `/health` | Health + uptime |
 
-Full API reference: [API.md](API.md)
+### Session Accountability (`--features atheneum`)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/atheneum/sessions` | Record session start |
+| `PATCH` | `/atheneum/sessions/{id}` | Record session end |
+| `GET` | `/atheneum/sessions` | Query recent sessions (`?project=X&last=N`) |
+| `POST` | `/atheneum/sessions/{id}/handover` | Write subagent handover note |
+| `POST` | `/atheneum/tool-calls` | Record tool call |
+| `GET` | `/atheneum/events` | Query event log |
+| `GET` | `/atheneum/context` | Recent project discoveries (`?project=X&limit=N`) |
+| `POST` | `/atheneum/discoveries` | Store discovery |
+| `GET` | `/atheneum/knowledge` | Query knowledge by target |
+| `GET` | `/atheneum/search` | Semantic search |
+| `POST` | `/atheneum/tasks` | Create task |
+| `GET` | `/atheneum/tasks` | List tasks |
+
+Full API: [API.md](API.md)
+
+## `envoy-hook` Binary
+
+Standalone binary for Claude Code hooks. Reads session context from environment and stdin, posts to envoy.
+
+```bash
+envoy-hook session-start    # SessionStart hook  — registers agent, writes GROUNDED_AGENT_ID
+envoy-hook tool-call        # PostToolUse hook   — logs tool call
+envoy-hook session-end      # Stop hook          — patches session
+envoy-hook subagent-end     # SubagentStop hook  — patches session + writes git diff handover
+```
+
+Wire in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart":  [{"hooks":[{"type":"command","command":"envoy-hook session-start","timeout":5}]}],
+    "SubagentStart": [{"hooks":[{"type":"command","command":"envoy-hook session-start","timeout":5}]}],
+    "PostToolUse":   [{"hooks":[{"type":"command","command":"envoy-hook tool-call","timeout":5}]}],
+    "Stop":          [{"hooks":[{"type":"command","command":"envoy-hook session-end","timeout":5}]}],
+    "SubagentStop":  [{"hooks":[{"type":"command","command":"envoy-hook subagent-end","timeout":5}]}]
+  }
+}
+```
 
 ## Configuration
 
 | Env Var | Default | Purpose |
 |---------|---------|---------|
-| `ENVOY_DB` | `~/.local/share/envoy/server.db` | SQLite database path |
+| `ENVOY_DB` | `~/.local/share/envoy/agents.db` | Agent registry SQLite path |
+| `ATHENEUM_DB` | `~/.local/share/atheneum/atheneum.db` | Knowledge graph SQLite path |
 | `ENVOY_PORT` | `9876` | HTTP listen port |
+| `ENVOY_URL` | `http://127.0.0.1:9876` | Used by `envoy-hook` and MCP server |
+
+## Features
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `default` | ✓ | Includes `atheneum` — all session + knowledge endpoints |
+| `atheneum` | ✓ | Atheneum bridge (`/atheneum/*` endpoints) |
 
 ## Requirements
 
-- Rust 1.82+
+- Rust 1.75+
 - SQLite (bundled via rusqlite)
+
+## Related
+
+- [atheneum](https://github.com/oldnordic/atheneum) — embedded graph DB (used by envoy for knowledge storage)
+- [grounded-coding](https://github.com/oldnordic/grounded-coding) — Claude Code plugin (skills + hooks using envoy)
+- [magellan](https://github.com/oldnordic/magellan) — code graph indexer
+- [sqlitegraph](https://crates.io/crates/sqlitegraph) — SQLite graph engine
 
 ## License
 
-GPL-3.0-only
+GPL-3.0-only — see [LICENSE](LICENSE).

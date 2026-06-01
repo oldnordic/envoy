@@ -304,13 +304,8 @@ pub async fn get_search(
             use atheneum::graph::AtheneumGraph;
             let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
                 .map_err(crate::error::EnvoyError::from)?;
-            // Rebuild the index on each request — small DBs, in-memory HNSW,
-            // and this keeps fresh discoveries searchable without a separate
-            // "reindex" endpoint. Swap to lazy/periodic if it ever shows up
-            // in a profile.
-            atheneum
-                .build_search_index()
-                .map_err(crate::error::EnvoyError::from)?;
+            // Auto-index on write means all discoveries are already indexed.
+            // No need to rebuild; semantic_search handles lazy index creation.
             let hits = atheneum
                 .semantic_search(&q, k, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;
@@ -383,7 +378,12 @@ pub async fn get_project_context(
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown")
                         .to_string();
-                    ProjectContextItem { discovery_type: dtype, target, why, agent }
+                    ProjectContextItem {
+                        discovery_type: dtype,
+                        target,
+                        why,
+                        agent,
+                    }
                 })
                 .collect())
         })
