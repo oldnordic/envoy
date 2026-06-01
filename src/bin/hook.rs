@@ -265,16 +265,21 @@ fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
     let project = project_name(&dir);
     let (branch, head) = git_info(&dir);
     let model = std::env::var("CLAUDE_MODEL").ok();
+    let parent_sid = std::env::var("CLAUDE_PARENT_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let trigger = if parent_sid.is_some() { "subagent" } else { "cli" };
 
     let body = json!({
-        "session_id": sid,
-        "agent":      AGENT_NAME,
-        "project":    project,
-        "tool":       "claude-code",
-        "trigger":    "session_start",
-        "model":      model,
-        "git_branch": branch,
-        "git_head":   head,
+        "session_id":        sid,
+        "agent":             AGENT_NAME,
+        "project":           project,
+        "tool":              "claude-code",
+        "trigger":           trigger,
+        "model":             model,
+        "git_branch":        branch,
+        "git_head":          head,
+        "parent_session_id": parent_sid,
     });
 
     post_auth(&format!("{}/atheneum/sessions", envoy_url()), &aid, body)
@@ -389,6 +394,74 @@ fn cmd_session_end() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+fn cmd_subagent_end() -> Result<(), Box<dyn std::error::Error>> {
+    let mut raw = String::new();
+    std::io::stdin().read_to_string(&mut raw).ok();
+    let payload: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+
+    let sid = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(session_id)
+        .filter(|s| !s.is_empty());
+    let sid = match sid {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let aid = agent_id()?;
+    let dir = project_dir();
+
+    // Patch session end (same as session-end)
+    let stop_reason = payload
+        .get("stop_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("end_turn");
+    patch_auth(
+        &format!("{}/atheneum/sessions/{}", envoy_url(), sid),
+        &aid,
+        json!({
+            "exit_status": stop_reason,
+            "prompt_count": 0, "tool_call_count": 0,
+            "file_write_count": 0, "commit_count": 0,
+            "test_run_count": 0, "total_input_tokens": 0,
+            "total_output_tokens": 0, "total_cost_usd": 0.0,
+        }),
+    )
+    .ok();
+
+    // Build compact handover summary from git diff --stat
+    let diff_stat = std::process::Command::new("git")
+        .args(["-C", &dir, "diff", "--stat", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let files_changed: Vec<String> = diff_stat
+        .lines()
+        .filter(|l| l.contains('|'))
+        .map(|l| l.split('|').next().unwrap_or("").trim().to_string())
+        .take(20)
+        .collect();
+
+    let summary = truncate(
+        &format!("subagent stop_reason={stop_reason} diff:{diff_stat}"),
+        300,
+    );
+
+    post_auth(
+        &format!("{}/atheneum/sessions/{}/handover", envoy_url(), sid),
+        &aid,
+        json!({
+            "summary": summary,
+            "files_changed": files_changed,
+            "outcome": stop_reason,
+        }),
+    )
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
@@ -397,17 +470,18 @@ fn main() {
         Some("session-start") => cmd_session_start(),
         Some("tool-call") => cmd_tool_call(),
         Some("session-end") => cmd_session_end(),
+        Some("subagent-end") => cmd_subagent_end(),
         Some(other) => {
             eprintln!(
                 "envoy-hook: unknown command '{other}'\n\
-                 usage: envoy-hook session-start | tool-call | session-end"
+                 usage: envoy-hook session-start | tool-call | session-end | subagent-end"
             );
             Ok(())
         }
         None => {
             eprintln!(
                 "envoy-hook: no command given\n\
-                 usage: envoy-hook session-start | tool-call | session-end"
+                 usage: envoy-hook session-start | tool-call | session-end | subagent-end"
             );
             Ok(())
         }

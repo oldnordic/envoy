@@ -110,11 +110,15 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
         )
         .route(
             "/atheneum/sessions",
-            axum::routing::post(sessions::post_session),
+            axum::routing::post(sessions::post_session).get(sessions::get_sessions),
         )
         .route(
             "/atheneum/sessions/{id}",
             axum::routing::patch(sessions::patch_session),
+        )
+        .route(
+            "/atheneum/sessions/{id}/handover",
+            axum::routing::post(sessions::post_subagent_handover),
         )
         .route(
             "/atheneum/prompts",

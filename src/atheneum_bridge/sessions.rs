@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::atheneum_bridge::types::*;
 use crate::error::Result;
 use crate::http::AppState;
+use atheneum::graph::SessionSummary;
 
 pub async fn post_session(
     State(state): State<Arc<AppState>>,
@@ -27,6 +28,7 @@ pub async fn post_session(
                 model: req.model,
                 git_branch: req.git_branch,
                 git_head: req.git_head,
+                parent_session_id: req.parent_session_id,
             })
             .map_err(crate::error::EnvoyError::from)
         })
@@ -285,4 +287,46 @@ pub async fn get_events(
         .await?;
 
     Ok(Json(QueryEventsResponse { events }))
+}
+
+/// GET /atheneum/sessions — query recent sessions for a project
+pub async fn get_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<QuerySessionsQuery>,
+) -> Result<impl axum::response::IntoResponse> {
+    let atheneum_path = state.require_atheneum_path()?;
+    let project = query.project.clone();
+    let last = query.last;
+    let parent_id = query.parent_id.clone();
+
+    let sessions: Vec<SessionSummary> = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.query_sessions(&project, last, parent_id.as_deref())
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+
+    Ok(Json(sessions))
+}
+
+/// POST /atheneum/sessions/{id}/handover — record subagent handover note
+pub async fn post_subagent_handover(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(req): Json<SubagentHandoverRequest>,
+) -> Result<axum::http::StatusCode> {
+    let atheneum_path = state.require_atheneum_path()?;
+    state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.record_subagent_handover(&session_id, &req.summary, &req.files_changed, &req.outcome)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok(axum::http::StatusCode::CREATED)
 }

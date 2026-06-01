@@ -354,6 +354,7 @@ pub struct RecordSessionRequest {
     pub model: Option<String>,
     pub git_branch: Option<String>,
     pub git_head: Option<String>,
+    pub parent_session_id: Option<String>,
 }
 
 // default_search_k, default_tool, default_trigger, default_event_limit moved to utils.rs
@@ -362,6 +363,31 @@ pub struct RecordSessionRequest {
 pub struct RecordSessionResponse {
     pub session_id: String,
     pub recorded: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuerySessionsQuery {
+    pub project: String,
+    #[serde(default = "default_sessions_last")]
+    pub last: i64,
+    pub parent_id: Option<String>,
+}
+
+fn default_sessions_last() -> i64 {
+    5
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubagentHandoverRequest {
+    pub summary: String,
+    #[serde(default)]
+    pub files_changed: Vec<String>,
+    #[serde(default = "default_outcome")]
+    pub outcome: String,
+}
+
+fn default_outcome() -> String {
+    "complete".to_string()
 }
 
 #[derive(Debug, Deserialize)]
