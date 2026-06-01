@@ -26,7 +26,7 @@ Each tool is independently useful. Together they give LLM coding agents the infr
 ## Install
 
 ```bash
-cargo install envoy   # installs both `envoy` server and `envoy-hook` binary
+cargo install grounded-envoy   # installs both `envoy` server and `envoy-hook` binary
 ```
 
 Or via the grounded-coding installer (recommended — also installs magellan, llmgrep, mirage, splice):

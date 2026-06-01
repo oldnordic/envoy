@@ -1,6 +1,6 @@
 [package]
-name = "envoy"
-version = "0.2.0"
+name = "grounded-envoy"
+version = "0.1.0"
 edition = "2021"
 description = "Message/coordination server for AI coding agents using sqlitegraph pub/sub"
 license = "GPL-3.0-only"
@@ -11,10 +11,10 @@ keywords = ["agent", "coordination", "messaging", "llm", "sqlite"]
 categories = ["network-programming", "database-implementations", "asynchronous"]
 authors = ["oldnordic"]
 readme = "README.md"
-rust-version = "1.75"
+rust-version = "1.82"
 
 [dependencies]
-sqlitegraph = "= 3.0.5"
+sqlitegraph = "3.0.7"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -30,7 +30,7 @@ tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
-atheneum = { version = "0.1.0", optional = true }
+atheneum = { version = "0.1.1", optional = true }
 ureq = { version = "2", default-features = false, features = ["json"] }
 
 [dev-dependencies]
@@ -43,6 +43,10 @@ http-body-util = "0.1"
 [features]
 default = ["atheneum"]
 atheneum = ["dep:atheneum"]
+
+[lib]
+name = "envoy"
+path = "src/lib.rs"
 
 [[bin]]
 name = "envoy"

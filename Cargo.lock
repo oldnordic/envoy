@@ -366,33 +366,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
-name = "envoy"
-version = "0.2.0"
-dependencies = [
- "ahash",
- "anyhow",
- "atheneum",
- "axum",
- "chrono",
- "futures",
- "http-body-util",
- "hyper",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "sqlitegraph",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "tower",
- "tower-http",
- "ureq",
- "uuid",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -592,6 +565,33 @@ dependencies = [
  "rand_core 0.10.1",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "grounded-envoy"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "atheneum",
+ "axum",
+ "chrono",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlitegraph",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tower",
+ "tower-http",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]

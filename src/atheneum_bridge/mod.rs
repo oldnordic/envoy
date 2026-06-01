@@ -7,15 +7,6 @@
 //! - `tasks` — task CRUD + journal handlers
 //! - `actions` — action trace handlers
 //! - `ontology` — ontology class/property handlers
-//! Envoy-Atheneum Bridge HTTP endpoints.
-//!
-//! Split from monolithic `atheneum_bridge.rs` (1774 LOC) into focused modules:
-//! - `types` — request/response structs
-//! - `utils` — shared helper functions
-//! - `discovery` — discovery, handoff, knowledge, search, import handlers
-//! - `tasks` — task CRUD + journal handlers
-//! - `actions` — action trace handlers
-//! - `ontology` — ontology class/property handlers
 //! - `sessions` — session, prompt, tool-call, file-write, commit, test-run, events
 //! - `navigation` — graph entity/edge/neighbors/subgraph/navigate/stats handlers
 

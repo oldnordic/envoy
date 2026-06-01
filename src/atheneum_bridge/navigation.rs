@@ -139,7 +139,7 @@ pub async fn get_navigate(
                 .navigate(&q, k, depth, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;
             let resp: Vec<SubgraphViewResponse> =
-                views.iter().map(|v| to_subgraph_resp(v)).collect();
+                views.iter().map(to_subgraph_resp).collect();
             Ok::<_, crate::error::EnvoyError>(resp)
         })
         .await?;
