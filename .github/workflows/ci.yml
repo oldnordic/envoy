@@ -30,10 +30,8 @@ jobs:
 
       - name: Comment out private atheneum dependency for CI
         run: |
-          sed -i '/^#atheneum = { path/s/^#//' Cargo.toml
-          sed -i '/^atheneum = { path/s/^/# /' Cargo.toml
-          sed -i '/^atheneum = \[/d' Cargo.toml
           sed -i 's/^default = \["atheneum"\]/default = []/' Cargo.toml
+          sed -i 's/atheneum = \["dep:atheneum"\]/atheneum = []/' Cargo.toml
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -66,10 +64,8 @@ jobs:
 
       - name: Comment out private atheneum dependency for CI
         run: |
-          sed -i '/^#atheneum = { path/s/^#//' Cargo.toml
-          sed -i '/^atheneum = { path/s/^/# /' Cargo.toml
-          sed -i '/^atheneum = \[/d' Cargo.toml
           sed -i 's/^default = \["atheneum"\]/default = []/' Cargo.toml
+          sed -i 's/atheneum = \["dep:atheneum"\]/atheneum = []/' Cargo.toml
 
       - name: cargo test
         run: cargo test --all
@@ -90,10 +86,8 @@ jobs:
 
       - name: Comment out private atheneum dependency for CI
         run: |
-          sed -i '/^#atheneum = { path/s/^#//' Cargo.toml
-          sed -i '/^atheneum = { path/s/^/# /' Cargo.toml
-          sed -i '/^atheneum = \[/d' Cargo.toml
           sed -i 's/^default = \["atheneum"\]/default = []/' Cargo.toml
+          sed -i 's/atheneum = \["dep:atheneum"\]/atheneum = []/' Cargo.toml
 
       - name: Build release binary
         run: cargo build --release

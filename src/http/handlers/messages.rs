@@ -7,8 +7,6 @@ use crate::circuit;
 use crate::error::{EnvoyError, Result};
 use crate::http::state::{recover_lock, SharedState};
 use crate::http::types::*;
-#[cfg(feature = "atheneum")]
-use crate::message::MessageType;
 pub(crate) async fn pending_messages(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,

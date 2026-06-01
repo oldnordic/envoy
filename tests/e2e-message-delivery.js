@@ -32,7 +32,7 @@ let failed = 0;
 
 // ── HTTP helpers (mirrors envoy-channel.js exactly) ──
 
-function httpGet(urlPath, params) {
+function httpGet(urlPath, params, headers = {}) {
   return new Promise((resolve, reject) => {
     let url = `http://${HOST}:${PORT}` + urlPath;
     if (params) {
@@ -42,7 +42,7 @@ function httpGet(urlPath, params) {
         .join("&");
       if (qs) url += "?" + qs;
     }
-    const req = http.get(url, { timeout: 3000 }, (res) => {
+    const req = http.get(url, { timeout: 3000, headers }, (res) => {
       let body = "";
       res.on("data", (chunk) => (body += chunk));
       res.on("end", () => {
@@ -55,13 +55,13 @@ function httpGet(urlPath, params) {
   });
 }
 
-function httpPost(urlPath, data) {
+function httpPost(urlPath, data, headers = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(`http://${HOST}:${PORT}` + urlPath);
     const body = JSON.stringify(data);
     const req = http.request(
       { hostname: url.hostname, port: url.port, path: url.pathname, method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), ...headers },
         timeout: 3000 },
       (res) => {
         let respBody = "";
@@ -164,7 +164,7 @@ async function testSendMessage() {
     to: "id2",
     parts: [{ text: "Test message from A to B" }],
     context_id: "e2e-test",
-  });
+  }, { "x-agent-id": "id1" });
   assert(resp.status === 201, `message send returns 201 (got ${resp.status})`);
   assert(!!resp.body.message_id, `message has an ID`);
   return resp.body.message_id;
@@ -172,7 +172,7 @@ async function testSendMessage() {
 
 async function testPollShowsMessage() {
   console.log("\n--- Test 3: Poll Shows Unread Message ---");
-  const resp = await httpGet("/messages", { to: "id2", since: 0, limit: 10 });
+  const resp = await httpGet("/messages", { to: "id2", since: 0, limit: 10 }, { "x-agent-id": "id2" });
   assert(resp.status === 200, `poll returns 200`);
   const msgs = resp.body.messages || [];
   assert(msgs.length === 1, `exactly 1 message for agent-b (got ${msgs.length})`);
@@ -185,7 +185,7 @@ async function testPollAgainStillShows(msgId) {
   console.log("\n--- Test 4: Poll AGAIN — Message Must Still Appear ---");
   // This is the seenIds test. Before the fix, a second poll would return 0
   // because envoy_check added to seenIds on the first call.
-  const resp = await httpGet("/messages", { to: "id2", since: 0, limit: 10 });
+  const resp = await httpGet("/messages", { to: "id2", since: 0, limit: 10 }, { "x-agent-id": "id2" });
   const msgs = resp.body.messages || [];
   assert(msgs.length === 1, `message STILL appears on second poll (got ${msgs.length}) — seenIds bug check`);
   assert(msgs[0].message_id === msgId, `same message ID on second poll`);
@@ -193,18 +193,18 @@ async function testPollAgainStillShows(msgId) {
 
 async function testAckRemovesMessage(msgId) {
   console.log("\n--- Test 5: ACK Removes Message from Unacked Poll ---");
-  const resp = await httpPost(`/messages/${msgId}/ack`, { agent_id: "id2" });
+  const resp = await httpPost(`/messages/${msgId}/ack`, { agent_id: "id2" }, { "x-agent-id": "id2" });
   assert(resp.status === 200, `ACK returns 200`);
   assert(resp.body.acked_by && resp.body.acked_by.includes("id2"), `acked_by contains id2`);
 
-  const pollResp = await httpGet("/messages", { to: "id2", since: 0, limit: 10 });
+  const pollResp = await httpGet("/messages", { to: "id2", since: 0, limit: 10 }, { "x-agent-id": "id2" });
   const msgs = pollResp.body.messages || [];
   assert(msgs.length === 0, `ACKed message gone from unacked poll (got ${msgs.length})`);
 }
 
 async function testAckedIncluded() {
   console.log("\n--- Test 6: Include=acked Shows ACKed Message ---");
-  const resp = await httpGet("/messages", { to: "id2", since: 0, limit: 10, include: "acked" });
+  const resp = await httpGet("/messages", { to: "id2", since: 0, limit: 10, include: "acked" }, { "x-agent-id": "id2" });
   const msgs = resp.body.messages || [];
   assert(msgs.length === 1, `ACKed message visible with include=acked (got ${msgs.length})`);
 }
@@ -214,10 +214,10 @@ async function testHeartbeatCircuitReset() {
   try {
     // Record 5 failures to open the circuit
     for (let i = 0; i < 5; i++) {
-      const failResp = await httpPost("/agents/id2/circuit/failure", {});
+      const failResp = await httpPost("/agents/id2/circuit/failure", {}, { "x-agent-id": "id2" });
       assert(failResp.status === 200, `failure ${i+1} returns 200 (got ${failResp.status})`);
     }
-    const openResp = await httpGet("/agents/id2/circuit");
+    const openResp = await httpGet("/agents/id2/circuit", undefined, { "x-agent-id": "id2" });
     const openState = openResp.body?.state || "unknown";
     assert(openState === "open", `circuit is open after 5 failures (got ${openState})`);
 
@@ -225,10 +225,10 @@ async function testHeartbeatCircuitReset() {
     const hbResp = await httpPost("/heartbeat", {
       agent_id: "id2",
       status: { state: "working", working_on: "e2e-test" },
-    });
+    }, { "x-agent-id": "id2" });
     assert(hbResp.status === 200, `heartbeat returns 200 (got ${hbResp.status})`);
 
-    const closedResp = await httpGet("/agents/id2/circuit");
+    const closedResp = await httpGet("/agents/id2/circuit", undefined, { "x-agent-id": "id2" });
     const closedState = closedResp.body?.state || "unknown";
     const failCount = closedResp.body?.failure_count ?? -1;
     assert(closedState === "closed", `circuit closed after heartbeat (got ${closedState})`);
