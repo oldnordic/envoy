@@ -167,10 +167,6 @@ fn summarize_response(_tool: &str, resp: &Value) -> String {
 
 // ── Agent ID caching ─────────────────────────────────────────────────────────
 
-fn agent_id_path() -> PathBuf {
-    dirs_next().join("envoy").join("hook-agent-id")
-}
-
 fn dirs_next() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -180,44 +176,138 @@ fn dirs_next() -> PathBuf {
         })
 }
 
-/// Returns the cached agent-id, registering a new one with Envoy if needed.
-fn agent_id() -> Result<String, Box<dyn std::error::Error>> {
-    let path = agent_id_path();
+fn hook_agent_id_path() -> PathBuf {
+    dirs_next().join("envoy").join("hook-agent-id")
+}
 
-    // Return cached ID if it exists and the agent is still active
+fn session_agent_id_path(session_id: &str) -> PathBuf {
+    dirs_next()
+        .join("envoy")
+        .join("sessions")
+        .join(format!("{}.agent-id", session_id))
+}
+
+fn verify_agent_active(id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+    ureq::get(&format!("{}/agents/{}", envoy_url(), id))
+        .call()
+        .map(|r| r.status() == 200)
+        .unwrap_or(false)
+}
+
+fn register_agent(name: &str, kind: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let resp = ureq::post(&format!("{}/agents", envoy_url()))
+        .set("Content-Type", "application/json")
+        .send_string(&json!({"name": name, "kind": kind}).to_string())?;
+    let body: Value = serde_json::from_str(&resp.into_string()?)?;
+    body.get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "no agent_id in registration response".into())
+}
+
+fn write_cache(path: &PathBuf, id: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(path, id).ok();
+}
+
+/// Hook agent — persistent single identity for hook API calls.
+/// Used by tool-call / session-end commands that don't need per-session identity.
+fn agent_id() -> Result<String, Box<dyn std::error::Error>> {
+    let path = hook_agent_id_path();
     if path.exists() {
         let id = std::fs::read_to_string(&path)?.trim().to_string();
-        if !id.is_empty() {
-            // Verify the agent is still known to Envoy
-            let status = ureq::get(&format!("{}/agents/{}", envoy_url(), id))
-                .call()
-                .map(|r| r.status())
-                .unwrap_or(404);
-            if status == 200 {
-                return Ok(id);
-            }
+        if verify_agent_active(&id) {
+            return Ok(id);
+        }
+    }
+    let id = register_agent(AGENT_NAME, AGENT_KIND)?;
+    write_cache(&path, &id);
+    Ok(id)
+}
+
+/// Session agent — per-session identity exposed to the LLM via GROUNDED_AGENT_ID.
+///
+/// Check order:
+///   1. GROUNDED_AGENT_ID env var (already set this session) — verify still active
+///   2. Per-session cache file ~/.local/share/envoy/sessions/{sid}.agent-id
+///   3. Register fresh, named claude-main or claude-sub{N}
+///
+/// Writes the id back to CLAUDE_ENV_FILE so the LLM can read $GROUNDED_AGENT_ID.
+fn session_agent_id(
+    session_id: &str,
+    is_subagent: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    // 1. Check env var — non-empty and still active means we already registered
+    let env_id = std::env::var("GROUNDED_AGENT_ID").unwrap_or_default();
+    if !env_id.is_empty() && verify_agent_active(&env_id) {
+        return Ok(env_id);
+    }
+
+    // 2. Check per-session cache file
+    let cache_path = session_agent_id_path(session_id);
+    if cache_path.exists() {
+        let id = std::fs::read_to_string(&cache_path)?.trim().to_string();
+        if !id.is_empty() && verify_agent_active(&id) {
+            export_agent_id(&id);
+            return Ok(id);
         }
     }
 
-    // Register fresh
-    let resp = ureq::post(&format!("{}/agents", envoy_url()))
-        .set("Content-Type", "application/json")
-        .send_string(&json!({"name": AGENT_NAME, "kind": AGENT_KIND}).to_string())?;
+    // 3. Register fresh
+    // Count existing claude-sub agents to derive the next number
+    let name = if is_subagent {
+        let count = count_active_sub_agents().unwrap_or(0);
+        format!("claudesub{}", count + 1)
+    } else {
+        "claude-main".to_string()
+    };
 
-    let body: Value = serde_json::from_str(&resp.into_string()?)?;
-    let id = body
-        .get("agent_id")
-        .and_then(|v| v.as_str())
-        .ok_or("no agent_id in registration response")?
-        .to_string();
-
-    // Cache it
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, &id)?;
-
+    let id = register_agent(&name, "claude")?;
+    write_cache(&cache_path, &id);
+    export_agent_id(&id);
     Ok(id)
+}
+
+/// Count active claude-sub* agents to determine next subagent number.
+fn count_active_sub_agents() -> Result<usize, Box<dyn std::error::Error>> {
+    let resp = ureq::get(&format!("{}/agents", envoy_url())).call()?;
+    let body: Value = serde_json::from_str(&resp.into_string()?)?;
+    let count = body
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|a| {
+                    a.get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n.starts_with("claudesub"))
+                        .unwrap_or(false)
+                        && a.get("lifecycle")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "active")
+                            .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    Ok(count)
+}
+
+/// Write GROUNDED_AGENT_ID to CLAUDE_ENV_FILE so LLM sees it in subsequent tool calls.
+fn export_agent_id(id: &str) {
+    if let Ok(env_file) = std::env::var("CLAUDE_ENV_FILE") {
+        if !env_file.is_empty() {
+            let line = format!("export GROUNDED_AGENT_ID={}\n", id);
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&env_file) {
+                f.write_all(line.as_bytes()).ok();
+            }
+        }
+    }
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -255,7 +345,17 @@ fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
         Some(s) => s,
         None => return Ok(()),
     };
-    let aid = agent_id()?;
+    let parent_sid = std::env::var("CLAUDE_PARENT_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let is_subagent = parent_sid.is_some();
+
+    // Register (or reuse) per-session agent; writes GROUNDED_AGENT_ID to CLAUDE_ENV_FILE
+    let session_aid = session_agent_id(&sid, is_subagent).unwrap_or_else(|_| agent_id().unwrap_or_default());
+    if session_aid.is_empty() {
+        return Ok(());
+    }
+
     // Use cwd from stdin if available (more reliable than env in some contexts)
     let dir = stdin
         .get("cwd")
@@ -265,10 +365,7 @@ fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
     let project = project_name(&dir);
     let (branch, head) = git_info(&dir);
     let model = std::env::var("CLAUDE_MODEL").ok();
-    let parent_sid = std::env::var("CLAUDE_PARENT_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let trigger = if parent_sid.is_some() { "subagent" } else { "cli" };
+    let trigger = if is_subagent { "subagent" } else { "cli" };
 
     let body = json!({
         "session_id":        sid,
@@ -282,7 +379,7 @@ fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
         "parent_session_id": parent_sid,
     });
 
-    post_auth(&format!("{}/atheneum/sessions", envoy_url()), &aid, body)
+    post_auth(&format!("{}/atheneum/sessions", envoy_url()), &session_aid, body)
 }
 
 fn cmd_tool_call() -> Result<(), Box<dyn std::error::Error>> {
