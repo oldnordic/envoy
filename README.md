@@ -2,7 +2,26 @@
 
 HTTP+JSON coordination server for AI coding agents. Provides agent identity, structured messaging, session accountability, and knowledge persistence via the [atheneum](https://github.com/oldnordic/atheneum) graph database.
 
-Built on [sqlitegraph](https://crates.io/crates/sqlitegraph). Designed for use with [grounded-coding](https://github.com/oldnordic/grounded-coding).
+Part of the **grounded-coding ecosystem**. One-liner install via [grounded-coding](https://github.com/oldnordic/grounded-coding).
+
+## Ecosystem
+
+```
+grounded-coding ── install + Claude Code plugin (skills, hooks, MCP)
+       │
+       ├── magellan   ── code graph indexer (symbols, call graph, CFG)
+       ├── llmgrep    ── semantic code search over magellan graphs
+       ├── mirage     ── CFG analysis (paths, loops, dominance)
+       ├── splice     ── span-safe refactoring
+       │
+       ├── envoy      ◀── YOU ARE HERE (HTTP coordination server)
+       │     └── atheneum  ── embedded knowledge graph (sessions, discoveries, tasks)
+       │           └── sqlitegraph  ── SQLite graph engine
+       │
+       └── envoy-hook ── Claude Code hook binary (session + tool call logging)
+```
+
+Each tool is independently useful. Together they give LLM coding agents the infrastructure that vendors don't ship: persistent identity, audit trails, cross-session memory, and multi-agent coordination.
 
 ## Install
 
