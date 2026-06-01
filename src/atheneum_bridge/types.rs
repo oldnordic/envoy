@@ -367,7 +367,8 @@ pub struct RecordSessionResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct QuerySessionsQuery {
-    pub project: String,
+    #[serde(default)]
+    pub project: Option<String>,
     #[serde(default = "default_sessions_last")]
     pub last: i64,
     pub parent_id: Option<String>,
@@ -523,6 +524,14 @@ pub struct QueryEventsQuery {
 }
 
 // default_search_k, default_tool, default_trigger, default_event_limit moved to utils.rs
+
+#[derive(Debug, Deserialize)]
+pub struct RecordEventRequest {
+    pub session_id: String,
+    pub event_type: String,
+    pub entity_id: String,
+    pub payload: serde_json::Value,
+}
 
 #[derive(Debug, Serialize)]
 pub struct QueryEventsResponse {

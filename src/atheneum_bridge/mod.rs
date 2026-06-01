@@ -148,5 +148,8 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
             "/atheneum/bench-runs",
             axum::routing::post(sessions::post_bench_run),
         )
-        .route("/atheneum/events", axum::routing::get(sessions::get_events))
+        .route(
+            "/atheneum/events",
+            axum::routing::post(sessions::post_event).get(sessions::get_events),
+        )
 }

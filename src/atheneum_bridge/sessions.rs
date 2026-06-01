@@ -266,6 +266,29 @@ pub async fn post_bench_run(
     Ok(axum::http::StatusCode::CREATED)
 }
 
+/// POST /atheneum/events — record a generic event
+pub async fn post_event(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RecordEventRequest>,
+) -> Result<axum::http::StatusCode> {
+    let atheneum_path = state.require_atheneum_path()?;
+    state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            g.record_event(atheneum::graph::RecordEventParams {
+                session_id: req.session_id,
+                event_type: req.event_type,
+                entity_id: req.entity_id,
+                payload: req.payload,
+            })
+            .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+    Ok(axum::http::StatusCode::CREATED)
+}
+
 /// GET /atheneum/events — query the event log
 pub async fn get_events(
     State(state): State<Arc<AppState>>,
@@ -304,7 +327,7 @@ pub async fn get_sessions(
             use atheneum::graph::AtheneumGraph;
             let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
                 .map_err(crate::error::EnvoyError::from)?;
-            g.query_sessions(&project, last, parent_id.as_deref())
+            g.query_sessions(project.as_deref(), last, parent_id.as_deref())
                 .map_err(crate::error::EnvoyError::from)
         })
         .await?;

@@ -351,7 +351,8 @@ fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
     let is_subagent = parent_sid.is_some();
 
     // Register (or reuse) per-session agent; writes GROUNDED_AGENT_ID to CLAUDE_ENV_FILE
-    let session_aid = session_agent_id(&sid, is_subagent).unwrap_or_else(|_| agent_id().unwrap_or_default());
+    let session_aid =
+        session_agent_id(&sid, is_subagent).unwrap_or_else(|_| agent_id().unwrap_or_default());
     if session_aid.is_empty() {
         return Ok(());
     }
@@ -379,7 +380,11 @@ fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
         "parent_session_id": parent_sid,
     });
 
-    post_auth(&format!("{}/atheneum/sessions", envoy_url()), &session_aid, body)
+    post_auth(
+        &format!("{}/atheneum/sessions", envoy_url()),
+        &session_aid,
+        body,
+    )
 }
 
 fn cmd_tool_call() -> Result<(), Box<dyn std::error::Error>> {
