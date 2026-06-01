@@ -63,6 +63,8 @@ checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
 [[package]]
 name = "atheneum"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1319a8bb2e14049e101025df14288d5d1d6c12e4335372a545dff2a325e3cb4f"
 dependencies = [
  "anyhow",
  "chrono",

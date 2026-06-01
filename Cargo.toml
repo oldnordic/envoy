@@ -30,7 +30,7 @@ tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
-atheneum = { path = "../atheneum", optional = true }
+atheneum = { version = "0.1.2", optional = true }
 ureq = { version = "2", default-features = false, features = ["json"] }
 
 [dev-dependencies]
