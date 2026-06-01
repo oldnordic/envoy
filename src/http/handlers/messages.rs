@@ -7,6 +7,7 @@ use crate::circuit;
 use crate::error::{EnvoyError, Result};
 use crate::http::state::{recover_lock, SharedState};
 use crate::http::types::*;
+#[cfg(feature = "atheneum")]
 use crate::message::MessageType;
 pub(crate) async fn pending_messages(
     State(state): State<SharedState>,
@@ -119,7 +120,7 @@ pub(crate) async fn send_message(
 
     // Auto-persist handoffs to atheneum (non-blocking, fire-and-forget)
     #[cfg(feature = "atheneum")]
-    if stored.msg_type == MessageType::Handoff {
+    if stored.msg_type == crate::message::MessageType::Handoff {
         if let Some(ref atheneum_path) = state.atheneum_path {
             let atheneum_path = atheneum_path.clone();
             let from = stored.from.clone();
