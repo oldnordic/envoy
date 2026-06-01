@@ -56,6 +56,10 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
             axum::routing::get(discovery::get_search),
         )
         .route(
+            "/atheneum/context",
+            axum::routing::get(discovery::get_project_context),
+        )
+        .route(
             "/atheneum/tasks",
             axum::routing::post(tasks::post_task).get(tasks::get_tasks),
         )

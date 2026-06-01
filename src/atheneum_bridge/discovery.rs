@@ -335,3 +335,62 @@ pub async fn get_search(
         results,
     }))
 }
+
+/// GET /atheneum/context?project=X&limit=N
+/// Returns recent discoveries for a project without requiring a target query.
+/// Designed for SubagentStart hook: pulls knowledge and prints it into initial context.
+pub async fn get_project_context(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProjectContextQuery>,
+) -> Result<impl axum::response::IntoResponse> {
+    let project = query.project.clone();
+    let limit = query.limit;
+    let atheneum_path = state.require_atheneum_path()?;
+
+    let items: Vec<ProjectContextItem> = state
+        .with_engine_async(move |_engine| {
+            use atheneum::graph::AtheneumGraph;
+            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
+                .map_err(crate::error::EnvoyError::from)?;
+            let entities = g
+                .recent_project_context(&project, limit)
+                .map_err(crate::error::EnvoyError::from)?;
+            Ok(entities
+                .into_iter()
+                .map(|e| {
+                    let dtype = e
+                        .data
+                        .get("discovery_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Discovery")
+                        .to_string();
+                    let target = e
+                        .data
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&e.name)
+                        .to_string();
+                    let why = e
+                        .data
+                        .get("why")
+                        .or_else(|| e.data.get("metadata").and_then(|m| m.get("why")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let agent = e
+                        .data
+                        .get("agent")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    ProjectContextItem { discovery_type: dtype, target, why, agent }
+                })
+                .collect())
+        })
+        .await?;
+
+    Ok(Json(ProjectContextResponse {
+        project: query.project,
+        items,
+    }))
+}

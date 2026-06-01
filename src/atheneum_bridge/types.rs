@@ -99,6 +99,31 @@ pub struct KnowledgeQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ProjectContextQuery {
+    pub project: String,
+    #[serde(default = "default_context_limit")]
+    pub limit: i64,
+}
+
+fn default_context_limit() -> i64 {
+    8
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectContextItem {
+    pub discovery_type: String,
+    pub target: String,
+    pub why: String,
+    pub agent: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectContextResponse {
+    pub project: String,
+    pub items: Vec<ProjectContextItem>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub q: String,
     #[serde(default = "default_search_k")]
