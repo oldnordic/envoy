@@ -305,9 +305,9 @@ pub async fn get_search(
             let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
                 .map_err(crate::error::EnvoyError::from)?;
             // Auto-index on write means all discoveries are already indexed.
-            // No need to rebuild; semantic_search handles lazy index creation.
+            // No need to rebuild; lexical_search handles lazy index creation.
             let hits = atheneum
-                .semantic_search(&q, k, project.as_deref())
+                .lexical_search(&q, k, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;
             Ok(hits
                 .into_iter()

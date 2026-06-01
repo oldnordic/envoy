@@ -3,12 +3,18 @@
 ## Installation
 
 ```bash
+# From crates.io (recommended) — installs both `envoy` server and `envoy-hook`
+cargo install agent-envoy
+
+# From the grounded-coding installer (also installs magellan, llmgrep, mirage, splice)
+curl -fsSL https://raw.githubusercontent.com/oldnordic/grounded-coding/master/install.sh | sh
+
+# From source
 git clone https://github.com/oldnordic/envoy.git
 cd envoy
 cargo build --release
+# Binary at: target/release/envoy
 ```
-
-The binary is at `target/release/envoy`.
 
 ## Running the Server
 

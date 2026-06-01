@@ -26,7 +26,7 @@ Each tool is independently useful. Together they give LLM coding agents the infr
 ## Install
 
 ```bash
-cargo install grounded-envoy   # installs both `envoy` server and `envoy-hook` binary
+cargo install agent-envoy   # installs both `envoy` server and `envoy-hook` binary
 ```
 
 Or via the grounded-coding installer (recommended — also installs magellan, llmgrep, mirage, splice):
@@ -149,7 +149,7 @@ curl "http://127.0.0.1:9876/atheneum/context?project=my-project&limit=6"
 | `GET` | `/atheneum/context` | Recent project discoveries (`?project=X&limit=N`) |
 | `POST` | `/atheneum/discoveries` | Store discovery |
 | `GET` | `/atheneum/knowledge` | Query knowledge by target |
-| `GET` | `/atheneum/search` | Semantic search |
+| `GET` | `/atheneum/search` | Lexical search (hash-projected HNSW) |
 | `POST` | `/atheneum/tasks` | Create task |
 | `GET` | `/atheneum/tasks` | List tasks |
 

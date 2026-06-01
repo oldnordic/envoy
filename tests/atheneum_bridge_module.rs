@@ -1140,7 +1140,7 @@ pub async fn get_search(
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
         atheneum.build_search_index()?;
-        let hits = atheneum.semantic_search(&q, k, project.as_deref())?;
+        let hits = atheneum.lexical_search(&q, k, project.as_deref())?;
         Ok::<_, anyhow::Error>(
             hits.into_iter()
                 .map(|h| SearchResultItem {
