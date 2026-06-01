@@ -3,7 +3,7 @@
 ## Installation
 
 ```bash
-git clone https://github.com/oldnordic/envoy.git
+git clone https://github.com/feanor12/envoy.git
 cd envoy
 cargo build --release
 ```
@@ -22,14 +22,14 @@ ENVOY_PORT=9876 ENVOY_DB=/var/lib/envoy/server.db envoy
 
 The server logs to stdout:
 ```
-envoy server listening on 127.0.0.1:9876, db=/home/feanor/.envoy/server.db
+envoy server listening on 127.0.0.1:9876, db=~/.local/share/envoy/server.db
 ```
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENVOY_DB` | `/home/feanor/.envoy/server.db` | Path to the SQLite database. Created if it doesn't exist. |
+| `ENVOY_DB` | `~/.local/share/envoy/server.db` | Path to the SQLite database. Created if it doesn't exist. |
 | `ENVOY_PORT` | `9876` | TCP port for HTTP + WebSocket. |
 
 ## Agent Lifecycle
@@ -129,7 +129,7 @@ curl -X POST http://127.0.0.1:9876/messages \
           {"scope": "src/engine.rs", "change": "added publish()", "verified": true}
         ],
         "what_is_stubbed": [
-          {"location": "src/http.rs", "reason": "context too low"}
+          {"location": "src/http/", "reason": "context too low"}
         ],
         "remaining_work": ["Implement HTTP server"],
         "verification_state": {
@@ -307,3 +307,7 @@ All errors return JSON with `code` and `message`:
 | 400 | `TOO_MANY_PARTS` | More than 20 parts |
 | 400 | `SERIALIZATION_ERROR` | Invalid JSON body |
 | 500 | `INTERNAL_ERROR` | Database or graph error |
+
+## License
+
+GPL-3.0-only

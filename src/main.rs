@@ -4,8 +4,21 @@ use envoy::server;
 
 #[tokio::main]
 async fn main() {
-    let db_path =
-        std::env::var("ENVOY_DB").unwrap_or_else(|_| "/home/feanor/.envoy/server.db".to_string());
+    let db_path = std::env::var("ENVOY_DB").unwrap_or_else(|_| {
+        let base = std::env::var("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .ok()
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        base.join("envoy")
+            .join("server.db")
+            .to_string_lossy()
+            .into_owned()
+    });
 
     // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(&db_path).parent() {

@@ -96,7 +96,7 @@ async fn register_test_agents(state: Arc<AppState>) -> (String, String) {
 
 /// Helper to build test router with the given state
 fn build_test_router(state: Arc<AppState>) -> axum::Router {
-    envoy::http::build_router(state)
+    envoy::http::build_router_unlimited(state)
 }
 
 // ============================================================================

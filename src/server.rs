@@ -77,17 +77,35 @@ pub async fn run_with_atheneum(
         }
     });
 
-    // Spawn CI monitor for magellan
-    let ci_state = state.clone();
-    tokio::spawn(async move {
-        ci::run_ci_monitor(ci_state, "magellan".into(), "oldnordic/magellan".into(), 60).await;
-    });
+    if let Ok(ci_cfg) = std::env::var("ENVOY_CI_MONITOR") {
+        let parts: Vec<&str> = ci_cfg.splitn(3, ',').collect();
+        if parts.len() == 3 {
+            let project = parts[0].to_string();
+            let owner_repo = parts[1].to_string();
+            let interval: u64 = parts[2].parse().unwrap_or(60);
+            let ci_state = state.clone();
+            tokio::spawn(async move {
+                ci::run_ci_monitor(ci_state, project, owner_repo, interval).await;
+            });
+        } else {
+            eprintln!("ENVOY_CI_MONITOR format: project,owner/repo,interval_secs");
+        }
+    }
 
-    // Spawn doc monitor for magellan
-    let doc_state = state.clone();
-    tokio::spawn(async move {
-        doc::run_doc_monitor(doc_state, "magellan".into(), ".".into(), 300).await;
-    });
+    if let Ok(doc_cfg) = std::env::var("ENVOY_DOC_MONITOR") {
+        let parts: Vec<&str> = doc_cfg.splitn(3, ',').collect();
+        if parts.len() == 3 {
+            let project = parts[0].to_string();
+            let repo_path = parts[1].to_string();
+            let interval: u64 = parts[2].parse().unwrap_or(300);
+            let doc_state = state.clone();
+            tokio::spawn(async move {
+                doc::run_doc_monitor(doc_state, project, repo_path, interval).await;
+            });
+        } else {
+            eprintln!("ENVOY_DOC_MONITOR format: project,repo_path,interval_secs");
+        }
+    }
 
     let app = build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     let listener = tokio::net::TcpListener::bind(addr)

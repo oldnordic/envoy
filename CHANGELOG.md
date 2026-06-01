@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+### Architecture
+
+- **Split `src/http.rs` (1968 LOC) into focused modules** — `src/http/` directory:
+  - `state.rs` — `AppState`, `SharedState`, `WsRegistry`, `recover_lock`, `run_nudge_loop`
+  - `middleware.rs` — `rate_limit_middleware`
+  - `router.rs` — `build_router`, `build_router_unlimited`, `build_base_routes`
+  - `types.rs` — request/response structs (`RegisterRequest`, `SendMessageRequest`, etc.)
+  - `handlers/` — 8 focused handler modules split from monolithic `handlers.rs`:
+    - `agents.rs` — agent CRUD handlers (`register_agent`, `disconnect_agent`, etc.)
+    - `messages.rs` — message handlers (`send_message`, `poll_messages`, etc.)
+    - `diagnostics.rs` — health and stats handlers
+    - `circuits.rs` — circuit breaker and dependency handlers
+    - `audit.rs` — event ingestion and audit query handlers
+    - `tasks.rs` — task CRUD handlers
+    - `subscriptions.rs` — project subscription handlers
+    - `project.rs` — project config handlers
+    - `mod.rs` — re-exports preserving `router.rs` wildcard import compatibility
+  - `ws.rs` — WebSocket handler and `broadcast_to_project`
+  - All existing public API preserved via `mod.rs` re-exports.
+
+- **Split `src/atheneum_bridge.rs` (~2400 LOC) into focused modules** — `src/atheneum_bridge/` directory:
+  - `utils.rs` — Shared helpers (`entity_to_json`, `parse_status`, `parse_blocker_type`, `default_*`)
+  - `types.rs` — All request/response structs (`SearchRequest`, `IngestRequest`, `BlockerRequest`, etc.)
+  - `discovery.rs` — Discovery CRUD handlers
+  - `tasks.rs` — Task/kanban handlers
+  - `actions.rs` — Blocker/action handlers
+  - `ontology.rs` — Ontology/graph handlers
+  - `import.rs` — Import/ingest handlers
+  - `sessions.rs` — Session recording handlers
+  - All existing public API preserved via `mod.rs` re-exports.
+
 ## 0.3.0 — 2026-05-09
 
 Atheneum integration — cross-agent knowledge sharing and handoff protocol.
@@ -194,7 +227,7 @@ Initial MVP release.
 
 ### Server Binary
 
-- `ENVOY_DB` env var (default: `/home/feanor/.envoy/server.db`)
+- `ENVOY_DB` env var (default: `~/.local/share/envoy/server.db`)
 - `ENVOY_PORT` env var (default: `9876`)
 - Automatically creates parent directory for DB path
 - `cargo run` starts the server immediately

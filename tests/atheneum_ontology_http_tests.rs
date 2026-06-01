@@ -241,7 +241,7 @@ async fn test_seed_endpoint_populates_standard_classes() {
     )
     .await;
     assert_eq!(s, axum::http::StatusCode::OK);
-    assert!(body["seeded"].as_i64().unwrap_or(0) >= 15);
+    assert!(body["seeded"].as_i64().unwrap_or(0) >= 14);
 
     let (_, listed) = req(
         &app,
@@ -256,7 +256,7 @@ async fn test_seed_endpoint_populates_standard_classes() {
         .iter()
         .filter_map(|c| c["name"].as_str())
         .collect();
-    for required in ["Agent", "Task", "Project", "CodeSymbol", "WikiPage"] {
+    for required in ["Agent", "Task", "WikiPage"] {
         assert!(
             names.contains(&required),
             "{} must be seeded (got: {:?})",

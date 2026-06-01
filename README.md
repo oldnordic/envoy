@@ -54,7 +54,13 @@ src/
 ├── engine.rs       # Core pub/sub engine (wraps sqlitegraph)
 ├── agent.rs        # AgentRegistry with parent/child hierarchy
 ├── message.rs      # MessageEnvelope, Part, HandoffData, MessageStore
-├── http.rs         # Axum HTTP + WebSocket handlers, AppState, WsRegistry
+├── http/           # Axum HTTP + WebSocket handlers (split into focused modules)
+│   ├── state.rs    # AppState, SharedState, WsRegistry
+│   ├── router.rs   # Route table construction
+│   ├── types.rs    # Request/response structs
+│   ├── handlers/   # HTTP handler functions (agents, messages, tasks, events, audit)
+│   ├── middleware.rs # Rate limiting
+│   └── ws.rs       # WebSocket handler and broadcast logic
 └── server.rs       # Server startup (DB open + axum::serve)
 ```
 
@@ -100,7 +106,7 @@ Full API reference: [API.md](API.md)
 
 | Env Var | Default | Purpose |
 |---------|---------|---------|
-| `ENVOY_DB` | `/home/feanor/.envoy/server.db` | SQLite database path |
+| `ENVOY_DB` | `~/.local/share/envoy/server.db` | SQLite database path |
 | `ENVOY_PORT` | `9876` | HTTP listen port |
 
 ## Requirements
@@ -110,4 +116,4 @@ Full API reference: [API.md](API.md)
 
 ## License
 
-GPL-3.0
+GPL-3.0-only

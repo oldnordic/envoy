@@ -41,7 +41,11 @@ fn project_dir() -> String {
     std::env::var("CLAUDE_PROJECT_DIR")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
         .unwrap_or_default()
 }
 
@@ -164,9 +168,7 @@ fn summarize_response(_tool: &str, resp: &Value) -> String {
 // ── Agent ID caching ─────────────────────────────────────────────────────────
 
 fn agent_id_path() -> PathBuf {
-    dirs_next()
-        .join("envoy")
-        .join("hook-agent-id")
+    dirs_next().join("envoy").join("hook-agent-id")
 }
 
 fn dirs_next() -> PathBuf {
@@ -304,7 +306,10 @@ fn cmd_tool_call() -> Result<(), Box<dyn std::error::Error>> {
 
     let input_summary = summarize_input(&tool_name, &payload);
     let input_hash = ahash_hex(&payload.to_string());
-    let latency_ms = payload.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+    let latency_ms = payload
+        .get("duration_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
 
     let tool_response = payload.get("tool_response").or(payload.get("tool_result"));
     let (output_summary, output_hash, exit_status) = match tool_response {
@@ -314,7 +319,9 @@ fn cmd_tool_call() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|v| v.as_str())
                 .map(|t| t == "error" || t == "tool_error")
                 .unwrap_or(false)
-                || r.get("interrupted").and_then(|v| v.as_bool()).unwrap_or(false);
+                || r.get("interrupted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
             (
                 Some(summarize_response(&tool_name, r)),
                 Some(ahash_hex(&r.to_string())),
