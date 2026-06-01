@@ -495,7 +495,8 @@ async fn send_message_offline_agent_fails() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    // Explicitly deleted agent is gone (404), not just offline (409)
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
