@@ -14,6 +14,11 @@
   - `GET /atheneum/graph/navigate?query=X[&k=N&depth=D&project=P]` — semantic search + graph walk (the primary LLM tool)
   - `GET /atheneum/graph/stats` — topological summary (entity + edge counts by kind/type)
 - **Semantic search auto-index** — `GET /atheneum/search` no longer rebuilds the HNSW index on every request. Discoveries are auto-indexed on write in `store_discovery()`.
+- **Typed hook provenance from `envoy-hook`** — `cmd_tool_call` now emits first-class Atheneum evidence in addition to coarse tool-call summaries:
+  - file reads and path inspection tools emit `accessed` relations via `POST /atheneum/events`
+  - successful `Write` / `Edit` calls emit `modified` relations via `POST /atheneum/events`
+  - bash test commands (`cargo test`, `pytest`, `go test`, `npm/pnpm/yarn/bun test`) emit `POST /atheneum/test-runs`
+  - tool errors emit failure relation events in addition to discovery records
 
 ### Fixed
 
@@ -23,6 +28,18 @@
 - **Removed `dashboard` feature** — `dashboard.rs` (498 LOC) was never compiled or routed. Feature flag, source file, and 3 test files deleted.
 - **SQL parameter ordering bug in `query_sessions`** — Fixed a mismatch where `parent_id` parameters were incorrectly placed when `project` was `None` but `parent_id` was `Some`, causing runtime SQLite parameter count errors.
 - **CI workflow dependency stripping** — `sed` command now correctly comments out both `[dependencies]` and `[dev-dependencies]` `atheneum` path entries to prevent "optional dependency not included in any feature" error during GitHub Actions.
+- **Atheneum v0.5.0 API compatibility** — All atheneum bridge handlers updated for breaking API changes: `query_knowledge_in_project` gained `max_tokens`, `lexical_search` gained `entity_kind`/`max_tokens`, `navigate` gained `entity_kind`/`max_tokens`, `PromptParams`/`ToolCallParams`/`FileWriteParams` gained new fields.
+
+## [0.1.1] — 2026-06-09
+
+### Fixed
+
+- **Atheneum v0.5.0 API compatibility** — Updated all bridge handlers for atheneum 0.5.0 API surface.
+
+### HPC Optimizations (Milestone 1)
+
+- **Atheneum graph connection pooling** — `AppState::with_atheneum_async()` caches `AtheneumGraph` in `Arc<Mutex<Option<AtheneumGraph>>>` and reuses it across `spawn_blocking` tasks. Eliminates per-request `AtheneumGraph::open()` (~50 call sites replaced). Before: every HTTP request opened a new SQLite connection (~50–100ms). After: graph opens once on first request, then reused indefinitely.
+- **`parking_lot::Mutex` for atheneum graph cache** — Switched from `std::sync::Mutex` to `parking_lot::Mutex` for the connection pool. Benefits: no poisoning (no `recover_lock` kludge), ~1 byte vs ~40 bytes, faster uncontended path (atomic ops, no kernel calls).
 
 ### Agent Registry (Breaking)
 

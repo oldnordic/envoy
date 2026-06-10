@@ -165,6 +165,275 @@ fn summarize_response(_tool: &str, resp: &Value) -> String {
     truncate(&resp.to_string(), 200)
 }
 
+// ── Extra-emission helpers ────────────────────────────────────────────────────
+
+/// Extract the file_path from a Write/Edit tool payload.
+fn extract_file_path(tool: &str, payload: &Value) -> Option<String> {
+    match tool {
+        "Write" | "Edit" => {
+            let ti = payload.get("tool_input").unwrap_or(payload);
+            ti.get("file_path")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        }
+        _ => None,
+    }
+}
+
+fn extract_accessed_paths(tool: &str, payload: &Value) -> Vec<String> {
+    let ti = payload.get("tool_input").unwrap_or(payload);
+    let mut paths = Vec::new();
+
+    match tool {
+        "Read" | "LS" | "Glob" | "Grep" => {
+            if let Some(path) = ti.get("file_path").and_then(|v| v.as_str()) {
+                paths.push(path.to_string());
+            }
+            if let Some(path) = ti.get("path").and_then(|v| v.as_str()) {
+                paths.push(path.to_string());
+            }
+            if let Some(items) = ti.get("paths").and_then(|v| v.as_array()) {
+                for item in items {
+                    if let Some(path) = item.as_str() {
+                        paths.push(path.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn relation_endpoint(kind: &str, name: String, file_path: Option<String>, data: Value) -> Value {
+    json!({
+        "kind": kind,
+        "name": name,
+        "file_path": file_path,
+        "data": data,
+    })
+}
+
+fn session_endpoint(session_id: &str) -> Value {
+    relation_endpoint(
+        "Session",
+        format!("claude-code:{session_id}"),
+        None,
+        json!({ "session_id": session_id }),
+    )
+}
+
+fn file_endpoint(path: &str) -> Value {
+    relation_endpoint(
+        "File",
+        path.to_string(),
+        Some(path.to_string()),
+        json!({ "file_path": path }),
+    )
+}
+
+fn project_endpoint(project: &str) -> Value {
+    relation_endpoint(
+        "Project",
+        project.to_string(),
+        None,
+        json!({ "project_id": project }),
+    )
+}
+
+fn failure_endpoint(tool_name: &str) -> Value {
+    relation_endpoint(
+        "Failure",
+        format!("tool:{tool_name}:error"),
+        None,
+        json!({ "tool_name": tool_name, "failure_type": "tool_error" }),
+    )
+}
+
+fn tool_relation_events(
+    session_id: &str,
+    project: &str,
+    tool_name: &str,
+    payload: &Value,
+    exit_status: &str,
+) -> Vec<Value> {
+    let mut events = Vec::new();
+    let session = session_endpoint(session_id);
+
+    for path in extract_accessed_paths(tool_name, payload) {
+        let file = file_endpoint(&path);
+        events.push(json!({
+            "session_id": session_id,
+            "event_type": "tool_relation",
+            "entity_id": format!("{session_id}:{tool_name}:{path}:accessed"),
+            "payload": {
+                "tool_name": tool_name,
+                "file_path": path,
+                "relations": [
+                    {
+                        "from": session.clone(),
+                        "to": file.clone(),
+                        "edge_type": "accessed",
+                        "data": { "tool_name": tool_name, "source": "envoy-hook" }
+                    },
+                    {
+                        "from": file,
+                        "to": project_endpoint(project),
+                        "edge_type": "belongs_to_project",
+                        "data": { "source": "envoy-hook" }
+                    }
+                ]
+            }
+        }));
+    }
+
+    if exit_status == "success" {
+        if let Some(path) = extract_file_path(tool_name, payload) {
+            let file = file_endpoint(&path);
+            events.push(json!({
+                "session_id": session_id,
+                "event_type": "tool_relation",
+                "entity_id": format!("{session_id}:{tool_name}:{path}:modified"),
+                "payload": {
+                    "tool_name": tool_name,
+                    "file_path": path,
+                    "relations": [
+                        {
+                            "from": session.clone(),
+                            "to": file.clone(),
+                            "edge_type": "modified",
+                            "data": { "tool_name": tool_name, "source": "envoy-hook" }
+                        },
+                        {
+                            "from": file,
+                            "to": project_endpoint(project),
+                            "edge_type": "belongs_to_project",
+                            "data": { "source": "envoy-hook" }
+                        }
+                    ]
+                }
+            }));
+        }
+    }
+
+    if exit_status == "error" {
+        events.push(json!({
+            "session_id": session_id,
+            "event_type": "tool_failure",
+            "entity_id": format!("{session_id}:{tool_name}:error"),
+            "payload": {
+                "tool_name": tool_name,
+                "relations": [
+                    {
+                        "from": failure_endpoint(tool_name),
+                        "to": session.clone(),
+                        "edge_type": "observed_in",
+                        "data": { "source": "envoy-hook" }
+                    },
+                    {
+                        "from": failure_endpoint(tool_name),
+                        "to": project_endpoint(project),
+                        "edge_type": "belongs_to_project",
+                        "data": { "source": "envoy-hook" }
+                    }
+                ]
+            }
+        }));
+    }
+
+    events
+}
+
+fn infer_test_suite(command: &str) -> Option<&'static str> {
+    let trimmed = command.trim();
+    if trimmed.starts_with("cargo test") {
+        Some("cargo")
+    } else if trimmed.starts_with("pytest") || trimmed.starts_with("python -m pytest") {
+        Some("pytest")
+    } else if trimmed.starts_with("go test") {
+        Some("go")
+    } else if trimmed.starts_with("npm test")
+        || trimmed.starts_with("pnpm test")
+        || trimmed.starts_with("yarn test")
+        || trimmed.starts_with("bun test")
+    {
+        Some("js-test")
+    } else {
+        None
+    }
+}
+
+fn maybe_test_run_body(
+    session_id: &str,
+    tool_name: &str,
+    payload: &Value,
+    exit_status: &str,
+    latency_ms: i64,
+    output_summary: Option<&str>,
+) -> Option<Value> {
+    if tool_name != "Bash" {
+        return None;
+    }
+
+    let command = payload
+        .get("tool_input")
+        .unwrap_or(payload)
+        .get("command")
+        .and_then(|v| v.as_str())?;
+    let suite = infer_test_suite(command)?;
+
+    Some(json!({
+        "session_id": session_id,
+        "test_name": truncate(command, 200),
+        "test_suite": suite,
+        "test_command": command,
+        "result": if exit_status == "success" { "passed" } else { "failed" },
+        "duration_ms": latency_ms,
+        "logs_summary": output_summary,
+        "commit_sha": null,
+    }))
+}
+
+/// Find the magellan DB for the current project directory.
+fn magellan_db_path(dir: &str) -> Option<String> {
+    let name = project_name(dir);
+    let candidates = [
+        format!("{dir}/.magellan/{name}.db"),
+        format!("{dir}/.magellan/{}.db", name.replace('-', "_")),
+    ];
+    candidates
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+}
+
+/// Parse `git diff --numstat HEAD` into (file, added, deleted) triples.
+fn git_diff_numstat(dir: &str) -> Vec<(String, u32, u32)> {
+    let out = std::process::Command::new("git")
+        .args(["-C", dir, "diff", "--numstat", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    out.lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() == 3 {
+                let added = parts[0].parse::<u32>().unwrap_or(0);
+                let deleted = parts[1].parse::<u32>().unwrap_or(0);
+                Some((parts[2].to_string(), added, deleted))
+            } else {
+                None
+            }
+        })
+        .take(50)
+        .collect()
+}
+
 // ── Agent ID caching ─────────────────────────────────────────────────────────
 
 fn dirs_next() -> PathBuf {
@@ -404,6 +673,12 @@ fn cmd_tool_call() -> Result<(), Box<dyn std::error::Error>> {
         None => return Ok(()),
     };
     let aid = agent_id()?;
+    let dir = payload
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(project_dir);
+    let project = project_name(&dir);
 
     let tool_name = payload
         .get("tool_name")
@@ -438,6 +713,43 @@ fn cmd_tool_call() -> Result<(), Box<dyn std::error::Error>> {
         None => (None, None, "unknown"),
     };
 
+    // Capture extras before values are moved into body.
+    let is_file_tool = matches!(tool_name.as_str(), "Write" | "Edit");
+    let is_error = exit_status == "error";
+    let file_path = if is_file_tool {
+        extract_file_path(&tool_name, &payload)
+    } else {
+        None
+    };
+    let write_type = if tool_name == "Write" {
+        "create"
+    } else {
+        "edit"
+    };
+    let disc_body = if is_error {
+        Some(json!({
+            "agent": AGENT_NAME,
+            "discovery_type": "ToolFailure",
+            "target": format!("tool:{tool_name}"),
+            "metadata": {
+                "session_id": &sid,
+                "input_summary": &input_summary,
+                "output_summary": output_summary.as_deref().unwrap_or(""),
+            }
+        }))
+    } else {
+        None
+    };
+    let relation_events = tool_relation_events(&sid, &project, &tool_name, &payload, exit_status);
+    let test_run_body = maybe_test_run_body(
+        &sid,
+        &tool_name,
+        &payload,
+        exit_status,
+        latency_ms,
+        output_summary.as_deref(),
+    );
+
     let body = json!({
         "session_id":      sid,
         "tool_name":       tool_name,
@@ -452,7 +764,41 @@ fn cmd_tool_call() -> Result<(), Box<dyn std::error::Error>> {
         "tool_category":   tool_category(&tool_name),
     });
 
-    post_auth(&format!("{}/atheneum/tool-calls", envoy_url()), &aid, body)
+    let result = post_auth(&format!("{}/atheneum/tool-calls", envoy_url()), &aid, body);
+
+    // Emit file-write relation for Write/Edit on success.
+    if let Some(fp) = file_path {
+        post_auth(
+            &format!("{}/atheneum/file-writes", envoy_url()),
+            &aid,
+            json!({
+                "session_id": &sid,
+                "file_path":  fp,
+                "write_type": write_type,
+            }),
+        )
+        .ok();
+    }
+
+    if let Some(test_body) = test_run_body {
+        post_auth(
+            &format!("{}/atheneum/test-runs", envoy_url()),
+            &aid,
+            test_body,
+        )
+        .ok();
+    }
+
+    for event in relation_events {
+        post_auth(&format!("{}/atheneum/events", envoy_url()), &aid, event).ok();
+    }
+
+    // Emit failure discovery on tool error.
+    if let Some(disc) = disc_body {
+        post_auth(&format!("{}/atheneum/discoveries", envoy_url()), &aid, disc).ok();
+    }
+
+    result
 }
 
 fn cmd_session_end() -> Result<(), Box<dyn std::error::Error>> {
@@ -494,6 +840,26 @@ fn cmd_session_end() -> Result<(), Box<dyn std::error::Error>> {
         &aid,
         body,
     )
+    .ok();
+
+    // Trigger magellan→Atheneum symbol import for this project.
+    let dir = project_dir();
+    if let Some(db_path) = magellan_db_path(&dir) {
+        let project = project_name(&dir);
+        post_auth(
+            &format!("{}/atheneum/import-magellan/all", envoy_url()),
+            &aid,
+            json!({
+                "magellan_db_path": db_path,
+                "agent_name": AGENT_NAME,
+                "project_id": project,
+                "limit": 500,
+            }),
+        )
+        .ok();
+    }
+
+    Ok(())
 }
 
 fn cmd_subagent_end() -> Result<(), Box<dyn std::error::Error>> {
@@ -562,6 +928,77 @@ fn cmd_subagent_end() -> Result<(), Box<dyn std::error::Error>> {
             "outcome": stop_reason,
         }),
     )
+    .ok();
+
+    // Emit file-write events for each changed file.
+    let numstat = git_diff_numstat(&dir);
+    for (file_path, added, deleted) in &numstat {
+        post_auth(
+            &format!("{}/atheneum/file-writes", envoy_url()),
+            &aid,
+            json!({
+                "session_id":    &sid,
+                "file_path":     file_path,
+                "lines_added":   added,
+                "lines_deleted": deleted,
+                "lines_changed": added + deleted,
+                "write_type":    "subagent_edit",
+            }),
+        )
+        .ok();
+    }
+
+    // Trigger magellan→Atheneum symbol import for this project.
+    if let Some(db_path) = magellan_db_path(&dir) {
+        let project = project_name(&dir);
+        post_auth(
+            &format!("{}/atheneum/import-magellan/all", envoy_url()),
+            &aid,
+            json!({
+                "magellan_db_path": db_path,
+                "agent_name": AGENT_NAME,
+                "project_id": project,
+                "limit": 500,
+            }),
+        )
+        .ok();
+    }
+
+    Ok(())
+}
+
+fn cmd_user_prompt() -> Result<(), Box<dyn std::error::Error>> {
+    let mut raw = String::new();
+    std::io::stdin().read_to_string(&mut raw).ok();
+    let payload: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+
+    let sid = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(session_id)
+        .filter(|s| !s.is_empty());
+    let sid = match sid {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let aid = agent_id()?;
+
+    let prompt = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+    if prompt.is_empty() {
+        return Ok(());
+    }
+
+    post_auth(
+        &format!("{}/atheneum/prompts", envoy_url()),
+        &aid,
+        json!({
+            "session_id": sid,
+            "role":       "user",
+            "sequence":   0,
+            "input_hash": ahash_hex(prompt),
+        }),
+    )
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -573,19 +1010,91 @@ fn main() {
         Some("tool-call") => cmd_tool_call(),
         Some("session-end") => cmd_session_end(),
         Some("subagent-end") => cmd_subagent_end(),
+        Some("user-prompt") => cmd_user_prompt(),
         Some(other) => {
             eprintln!(
                 "envoy-hook: unknown command '{other}'\n\
-                 usage: envoy-hook session-start | tool-call | session-end | subagent-end"
+                 usage: envoy-hook session-start | tool-call | session-end | subagent-end | user-prompt"
             );
             Ok(())
         }
         None => {
             eprintln!(
                 "envoy-hook: no command given\n\
-                 usage: envoy-hook session-start | tool-call | session-end | subagent-end"
+                 usage: envoy-hook session-start | tool-call | session-end | subagent-end | user-prompt"
             );
             Ok(())
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_accessed_paths_reads_file_inputs() {
+        let payload = json!({
+            "tool_input": {
+                "file_path": "src/main.rs"
+            }
+        });
+
+        assert_eq!(
+            extract_accessed_paths("Read", &payload),
+            vec!["src/main.rs"]
+        );
+    }
+
+    #[test]
+    fn tool_relation_events_emit_accessed_and_modified_edges() {
+        let read_payload = json!({
+            "tool_input": {
+                "file_path": "src/lib.rs"
+            }
+        });
+        let read_events =
+            tool_relation_events("session-1", "envoy", "Read", &read_payload, "success");
+        assert_eq!(read_events.len(), 1);
+        assert_eq!(
+            read_events[0]["payload"]["relations"][0]["edge_type"],
+            "accessed"
+        );
+
+        let edit_payload = json!({
+            "tool_input": {
+                "file_path": "src/lib.rs"
+            }
+        });
+        let edit_events =
+            tool_relation_events("session-1", "envoy", "Edit", &edit_payload, "success");
+        assert_eq!(edit_events.len(), 1);
+        assert_eq!(
+            edit_events[0]["payload"]["relations"][0]["edge_type"],
+            "modified"
+        );
+    }
+
+    #[test]
+    fn maybe_test_run_body_detects_cargo_test() {
+        let payload = json!({
+            "tool_input": {
+                "command": "cargo test -p forge-agent --lib"
+            }
+        });
+
+        let body = maybe_test_run_body(
+            "session-2",
+            "Bash",
+            &payload,
+            "success",
+            1200,
+            Some("tests passed"),
+        )
+        .expect("test run body");
+
+        assert_eq!(body["test_suite"], "cargo");
+        assert_eq!(body["result"], "passed");
+        assert_eq!(body["test_command"], "cargo test -p forge-agent --lib");
+    }
 }
