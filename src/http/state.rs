@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "atheneum")]
 use parking_lot::Mutex as FastMutex;
 use tokio::sync::broadcast;
 
