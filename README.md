@@ -150,6 +150,8 @@ curl "http://127.0.0.1:9876/atheneum/context?project=my-project&limit=6"
 | `POST` | `/atheneum/discoveries` | Store discovery |
 | `GET` | `/atheneum/knowledge` | Query knowledge by target |
 | `GET` | `/atheneum/search` | Lexical search (hash-projected HNSW) |
+| `GET` | `/atheneum/cross/search` | Cross-project symbol search (`?q=&language=&k=`) |
+| `GET` | `/atheneum/cross/navigate` | Cross-project search + subgraph walk (`?q=&language=&k=&depth=`) |
 | `POST` | `/atheneum/tasks` | Create task |
 | `GET` | `/atheneum/tasks` | List tasks |
 

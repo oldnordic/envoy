@@ -626,6 +626,70 @@ pub struct NavigateQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CrossSearchQuery {
+    pub q: String,
+    #[serde(default = "default_search_k")]
+    pub k: usize,
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CrossSearchResponse {
+    pub query: String,
+    pub language: Option<String>,
+    pub count: usize,
+    pub results: Vec<CrossSearchResultItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CrossSearchResultItem {
+    pub project: String,
+    pub id: i64,
+    pub kind: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CrossNavigateQuery {
+    pub q: String,
+    #[serde(default = "default_search_k")]
+    pub k: usize,
+    #[serde(default = "default_navigate_depth")]
+    pub depth: u32,
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CrossNavigateResponse {
+    pub query: String,
+    pub language: Option<String>,
+    pub count: usize,
+    pub views: Vec<CrossSubgraphView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CrossSubgraphView {
+    pub project: String,
+    pub entry_id: i64,
+    pub entities: Vec<CrossSearchResultItem>,
+    pub edges: Vec<CrossEdgeItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CrossEdgeItem {
+    pub id: i64,
+    pub kind: String,
+    pub from_id: i64,
+    pub to_id: i64,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct NeighborsQuery {
     pub depth: Option<u32>,
 }

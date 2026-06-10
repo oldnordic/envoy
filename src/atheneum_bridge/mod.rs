@@ -11,6 +11,7 @@
 //! - `navigation` — graph entity/edge/neighbors/subgraph/navigate/stats handlers
 
 pub mod actions;
+pub mod cross;
 pub mod discovery;
 pub mod import;
 pub mod navigation;
@@ -177,5 +178,13 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
         .route(
             "/atheneum/graph/stats",
             axum::routing::get(navigation::get_stats),
+        )
+        .route(
+            "/atheneum/cross/search",
+            axum::routing::get(cross::get_cross_search),
+        )
+        .route(
+            "/atheneum/cross/navigate",
+            axum::routing::get(cross::get_cross_navigate),
         )
 }

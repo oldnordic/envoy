@@ -338,7 +338,7 @@ pub async fn get_knowledge(
     let knowledge = tokio::task::spawn_blocking(move || {
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
-        atheneum.query_knowledge_in_project(&target, project.as_deref())
+        atheneum.query_knowledge_in_project(&target, project.as_deref(), None)
     })
     .await
     .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
@@ -1140,7 +1140,7 @@ pub async fn get_search(
         use atheneum::graph::AtheneumGraph;
         let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
         atheneum.build_search_index()?;
-        let hits = atheneum.lexical_search(&q, k, project.as_deref())?;
+        let hits = atheneum.lexical_search(&q, k, project.as_deref(), None, None)?;
         Ok::<_, anyhow::Error>(
             hits.into_iter()
                 .map(|h| SearchResultItem {
