@@ -21,7 +21,7 @@ grounded-coding ── install + Claude Code plugin (skills, hooks, MCP)
        └── envoy-hook ── Claude Code hook binary (session + tool call logging)
 ```
 
-Each tool is independently useful. Together they give LLM coding agents the infrastructure that vendors don't ship: persistent identity, audit trails, cross-session memory, and multi-agent coordination.
+Each tool is independently useful. Together they give language-model coding agents the infrastructure that vendors don't ship: persistent identity, audit trails, cross-session memory, and multi-agent coordination.
 
 ## Install
 
@@ -57,7 +57,7 @@ systemctl --user status envoy
 
 ## What It Does
 
-Envoy gives AI coding agents what LLM vendors don't ship:
+Envoy gives AI coding agents what language-model vendors don't ship:
 
 | Missing capability | Envoy provides |
 |-------------------|----------------|

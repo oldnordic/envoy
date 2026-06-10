@@ -11,7 +11,7 @@
   - `GET /atheneum/graph/entities/{id}` — read entity by ID
   - `GET /atheneum/graph/edges/{id}` — read edge by ID
   - `GET /atheneum/graph/entities/{id}/neighbors?depth=N` — one-hop edges (depth=0) or BFS subgraph (depth>0)
-  - `GET /atheneum/graph/navigate?query=X[&k=N&depth=D&project=P]` — semantic search + graph walk (the primary LLM tool)
+  - `GET /atheneum/graph/navigate?query=X[&k=N&depth=D&project=P]` — semantic search + graph walk (the primary language-model tool)
   - `GET /atheneum/graph/stats` — topological summary (entity + edge counts by kind/type)
 - **Semantic search auto-index** — `GET /atheneum/search` no longer rebuilds the HNSW index on every request. Discoveries are auto-indexed on write in `store_discovery()`.
 - **Typed hook provenance from `envoy-hook`** — `cmd_tool_call` now emits first-class Atheneum evidence in addition to coarse tool-call summaries:
