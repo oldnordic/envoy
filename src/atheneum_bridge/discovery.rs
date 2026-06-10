@@ -18,13 +18,8 @@ pub async fn post_discovery(
     let discovery_type2 = discovery_type.clone();
     let target2 = target.clone();
     let project_id = req.project_id.clone();
-    let atheneum_path = state.require_atheneum_path()?;
-
     let discovery_id = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             atheneum
                 .store_discovery_in_project(
                     &agent2,
@@ -56,13 +51,8 @@ pub async fn get_discoveries(
     let target = query.target.clone();
     let target2 = target.clone();
     let project = query.project.clone();
-    let atheneum_path = state.require_atheneum_path()?;
-
     let discoveries: Vec<DiscoveryData> = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             let entities = atheneum
                 .query_discoveries_in_project(&target2, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;
@@ -97,13 +87,8 @@ pub async fn post_handoff(
     let from_agent2 = from_agent.clone();
     let to_agent2 = to_agent.clone();
     let project_id = req.project_id.clone();
-    let atheneum_path = state.require_atheneum_path()?;
-
     let handoff_id = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             atheneum
                 .store_handoff_in_project(
                     &from_agent2,
@@ -133,13 +118,8 @@ pub async fn get_pending_handoff(
 ) -> Result<impl axum::response::IntoResponse> {
     let agent = query.agent.clone();
     let project = query.project.clone();
-    let atheneum_path = state.require_atheneum_path()?;
-
     let handoff = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             let entity = atheneum
                 .get_pending_handoff_in_project(&agent, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;
@@ -178,13 +158,8 @@ pub async fn claim_handoff(
     State(state): State<Arc<AppState>>,
     Path(handoff_id): Path<i64>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
-
     state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             atheneum
                 .mark_handoff_claimed(handoff_id)
                 .map_err(crate::error::EnvoyError::from)?;
@@ -205,15 +180,10 @@ pub async fn get_knowledge(
 ) -> Result<impl axum::response::IntoResponse> {
     let target = query.target.clone();
     let project = query.project.clone();
-    let atheneum_path = state.require_atheneum_path()?;
-
     let knowledge = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             let result = atheneum
-                .query_knowledge_in_project(&target, project.as_deref())
+                .query_knowledge_in_project(&target, project.as_deref(), None)
                 .map_err(crate::error::EnvoyError::from)?;
 
             // Transform result into response format
@@ -297,17 +267,12 @@ pub async fn get_search(
     let q = query.q.clone();
     let project = query.project.clone();
     let k = query.k.max(1);
-    let atheneum_path = state.require_atheneum_path()?;
-
     let results: Vec<SearchResultItem> = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             // Auto-index on write means all discoveries are already indexed.
             // No need to rebuild; lexical_search handles lazy index creation.
             let hits = atheneum
-                .lexical_search(&q, k, project.as_deref())
+                .lexical_search(&q, k, project.as_deref(), None, None)
                 .map_err(crate::error::EnvoyError::from)?;
             Ok(hits
                 .into_iter()
@@ -340,14 +305,9 @@ pub async fn get_project_context(
 ) -> Result<impl axum::response::IntoResponse> {
     let project = query.project.clone();
     let limit = query.limit;
-    let atheneum_path = state.require_atheneum_path()?;
-
     let items: Vec<ProjectContextItem> = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
-            let entities = g
+        .with_atheneum_async(move |atheneum| {
+            let entities = atheneum
                 .recent_project_context(&project, limit)
                 .map_err(crate::error::EnvoyError::from)?;
             Ok(entities

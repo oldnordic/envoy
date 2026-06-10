@@ -42,12 +42,8 @@ pub async fn get_entity(
     State(state): State<Arc<AppState>>,
     Path(entity_id): Path<i64>,
 ) -> Result<Json<GraphEntityResponse>> {
-    let atheneum_path = state.require_atheneum_path()?;
     let entity: atheneum::GraphEntity = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             g.get_entity(entity_id)
                 .map_err(crate::error::EnvoyError::from)
         })
@@ -60,12 +56,8 @@ pub async fn get_edge(
     State(state): State<Arc<AppState>>,
     Path(edge_id): Path<i64>,
 ) -> Result<Json<GraphEdgeResponse>> {
-    let atheneum_path = state.require_atheneum_path()?;
     let edge: atheneum::GraphEdge = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             g.get_edge(edge_id).map_err(crate::error::EnvoyError::from)
         })
         .await?;
@@ -80,15 +72,11 @@ pub async fn get_neighbors(
     Path(entity_id): Path<i64>,
     Query(query): Query<NeighborsQuery>,
 ) -> Result<Json<serde_json::Value>> {
-    let atheneum_path = state.require_atheneum_path()?;
     let depth = query.depth.unwrap_or(0);
 
     if depth > 0 {
         let sg: atheneum::graph::SubgraphView = state
-            .with_engine_async(move |_engine| {
-                use atheneum::graph::AtheneumGraph;
-                let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                    .map_err(crate::error::EnvoyError::from)?;
+            .with_atheneum_async(move |g| {
                 g.get_subgraph(entity_id, depth)
                     .map_err(crate::error::EnvoyError::from)
             })
@@ -98,10 +86,7 @@ pub async fn get_neighbors(
         Ok(Json(resp_value))
     } else {
         let (outgoing, incoming): (Vec<_>, Vec<_>) = state
-            .with_engine_async(move |_engine| {
-                use atheneum::graph::AtheneumGraph;
-                let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                    .map_err(crate::error::EnvoyError::from)?;
+            .with_atheneum_async(move |g| {
                 g.get_neighbors(entity_id)
                     .map_err(crate::error::EnvoyError::from)
             })
@@ -128,15 +113,10 @@ pub async fn get_navigate(
     let k = query.k.max(1);
     let depth = query.depth.max(1);
     let project = query.project.clone();
-    let atheneum_path = state.require_atheneum_path()?;
-
     let subgraphs: Vec<SubgraphViewResponse> = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             let views = g
-                .navigate(&q, k, depth, project.as_deref())
+                .navigate(&q, k, depth, project.as_deref(), None, None)
                 .map_err(crate::error::EnvoyError::from)?;
             let resp: Vec<SubgraphViewResponse> = views.iter().map(to_subgraph_resp).collect();
             Ok::<_, crate::error::EnvoyError>(resp)
@@ -151,12 +131,8 @@ pub async fn get_navigate(
 
 /// GET /atheneum/graph/stats — topological summary
 pub async fn get_stats(State(state): State<Arc<AppState>>) -> Result<Json<GraphStatsResponse>> {
-    let atheneum_path = state.require_atheneum_path()?;
     let stats: atheneum::graph::GraphStats = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             g.graph_stats().map_err(crate::error::EnvoyError::from)
         })
         .await?;

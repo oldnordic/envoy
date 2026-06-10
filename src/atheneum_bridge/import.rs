@@ -10,17 +10,13 @@ pub async fn post_import_magellan_symbol(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ImportMagellanSymbolRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
     let symbol_name = req.symbol_name;
     let agent_name = req.agent_name;
     let project_id = req.project_id;
 
     let result: Option<i64> = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             atheneum
                 .import_symbol_from_magellan(
                     &magellan_path,
@@ -57,17 +53,13 @@ pub async fn post_import_magellan_all(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ImportMagellanBulkRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let magellan_path = std::path::PathBuf::from(req.magellan_db_path);
     let agent_name = req.agent_name;
     let project_id = req.project_id;
     let limit = req.limit;
 
     let count: usize = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let atheneum = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |atheneum| {
             atheneum
                 .import_all_symbols_from_magellan(
                     &magellan_path,

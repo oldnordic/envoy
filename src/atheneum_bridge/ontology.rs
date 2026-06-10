@@ -11,12 +11,8 @@ pub async fn post_ontology_class(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateClassRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let id = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             g.define_class(&req.name, req.description.as_deref())
                 .map_err(crate::error::EnvoyError::from)
         })
@@ -31,12 +27,8 @@ pub async fn post_ontology_class(
 pub async fn get_ontology_classes(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let classes: Vec<serde_json::Value> = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             let classes = g.list_classes().map_err(crate::error::EnvoyError::from)?;
             Ok(classes
                 .into_iter()
@@ -58,12 +50,8 @@ pub async fn post_ontology_property(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePropertyRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let id = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             g.define_property(
                 &req.name,
                 &req.domain_class,
@@ -83,12 +71,8 @@ pub async fn post_ontology_property(
 pub async fn get_ontology_properties(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let properties: Vec<serde_json::Value> = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             let properties = g
                 .list_properties()
                 .map_err(crate::error::EnvoyError::from)?;
@@ -115,12 +99,8 @@ pub async fn get_ontology_validate(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ValidateEdgeQuery>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let allowed = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             g.validate_edge(&query.from, &query.to, &query.edge)
                 .map_err(crate::error::EnvoyError::from)
         })
@@ -133,12 +113,8 @@ pub async fn get_ontology_validate(
 pub async fn post_ontology_seed(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let seeded: i64 = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             g.seed_standard_ontology()
                 .map_err(crate::error::EnvoyError::from)?;
             Ok(g.list_classes()

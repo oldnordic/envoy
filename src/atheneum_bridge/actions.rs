@@ -12,12 +12,9 @@ pub async fn post_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateActionRequest>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let trace = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::{AtheneumGraph, ToolCallRecord};
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
+            use atheneum::graph::ToolCallRecord;
             let tool_calls: Vec<ToolCallRecord> = req
                 .tool_calls
                 .into_iter()
@@ -53,15 +50,11 @@ pub async fn get_actions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GetActionsQuery>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let atheneum_path = state.require_atheneum_path()?;
     let agent = query.agent.clone();
     let project = query.project.clone();
 
     let actions: Vec<serde_json::Value> = state
-        .with_engine_async(move |_engine| {
-            use atheneum::graph::AtheneumGraph;
-            let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))
-                .map_err(crate::error::EnvoyError::from)?;
+        .with_atheneum_async(move |g| {
             let records = g
                 .get_action_trace(&agent, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;

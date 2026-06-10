@@ -15,6 +15,9 @@ use crate::rate_limit::{HybridRateLimiter, RateLimitConfig};
 use crate::status::NudgeConfig;
 use crate::task::store::TaskStore;
 
+#[cfg(feature = "atheneum")]
+use atheneum::AtheneumGraph;
+
 pub(crate) fn recover_lock<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match lock.lock() {
         Ok(guard) => guard,
@@ -91,6 +94,8 @@ pub struct AppState {
     pub start_time: chrono::DateTime<chrono::Utc>,
     #[cfg(feature = "atheneum")]
     pub atheneum_path: Option<String>,
+    #[cfg(feature = "atheneum")]
+    atheneum_graph: Arc<Mutex<Option<AtheneumGraph>>>,
 }
 
 impl AppState {
@@ -119,6 +124,8 @@ impl AppState {
             start_time: chrono::Utc::now(),
             #[cfg(feature = "atheneum")]
             atheneum_path: None,
+            #[cfg(feature = "atheneum")]
+            atheneum_graph: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -162,6 +169,29 @@ impl AppState {
         tokio::task::spawn_blocking(move || {
             let engine = recover_lock(&engine);
             f(&engine)
+        })
+        .await
+        .map_err(|_| EnvoyError::InvalidEntity("blocking task panicked".into()))?
+    }
+
+    /// Async version that provides a cached AtheneumGraph.
+    /// Eliminates per-request SQLite open cost by reusing a single connection.
+    #[cfg(feature = "atheneum")]
+    pub async fn with_atheneum_async<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&AtheneumGraph) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let path = self.require_atheneum_path()?;
+        let graph_arc = self.atheneum_graph.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = recover_lock(&graph_arc);
+            if guard.is_none() {
+                let g = AtheneumGraph::open(std::path::Path::new(&path))?;
+                *guard = Some(g);
+            }
+            let g = guard.as_ref().unwrap();
+            f(g)
         })
         .await
         .map_err(|_| EnvoyError::InvalidEntity("blocking task panicked".into()))?
