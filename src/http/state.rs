@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use parking_lot::Mutex as FastMutex;
 use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
@@ -95,7 +96,7 @@ pub struct AppState {
     #[cfg(feature = "atheneum")]
     pub atheneum_path: Option<String>,
     #[cfg(feature = "atheneum")]
-    atheneum_graph: Arc<Mutex<Option<AtheneumGraph>>>,
+    atheneum_graph: Arc<FastMutex<Option<AtheneumGraph>>>,
 }
 
 impl AppState {
@@ -125,7 +126,7 @@ impl AppState {
             #[cfg(feature = "atheneum")]
             atheneum_path: None,
             #[cfg(feature = "atheneum")]
-            atheneum_graph: Arc::new(Mutex::new(None)),
+            atheneum_graph: Arc::new(FastMutex::new(None)),
         })
     }
 
@@ -185,7 +186,7 @@ impl AppState {
         let path = self.require_atheneum_path()?;
         let graph_arc = self.atheneum_graph.clone();
         tokio::task::spawn_blocking(move || {
-            let mut guard = recover_lock(&graph_arc);
+            let mut guard = graph_arc.lock();
             if guard.is_none() {
                 let g = AtheneumGraph::open(std::path::Path::new(&path))?;
                 *guard = Some(g);
