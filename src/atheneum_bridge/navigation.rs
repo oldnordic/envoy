@@ -57,9 +57,7 @@ pub async fn get_edge(
     Path(edge_id): Path<i64>,
 ) -> Result<Json<GraphEdgeResponse>> {
     let edge: atheneum::GraphEdge = state
-        .with_atheneum_async(move |g| {
-            g.get_edge(edge_id).map_err(crate::error::EnvoyError::from)
-        })
+        .with_atheneum_async(move |g| g.get_edge(edge_id).map_err(crate::error::EnvoyError::from))
         .await?;
     Ok(Json(to_edge_resp(&edge)))
 }
@@ -132,9 +130,7 @@ pub async fn get_navigate(
 /// GET /atheneum/graph/stats — topological summary
 pub async fn get_stats(State(state): State<Arc<AppState>>) -> Result<Json<GraphStatsResponse>> {
     let stats: atheneum::graph::GraphStats = state
-        .with_atheneum_async(move |g| {
-            g.graph_stats().map_err(crate::error::EnvoyError::from)
-        })
+        .with_atheneum_async(move |g| g.graph_stats().map_err(crate::error::EnvoyError::from))
         .await?;
 
     Ok(Json(GraphStatsResponse {
