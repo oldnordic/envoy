@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{EnvoyError, Result};
@@ -186,10 +187,7 @@ impl AgentRegistry {
     ) -> Result<AgentInfo> {
         // Check for existing active agent with same name (root agents only)
         if parent_id.is_none() {
-            let tree = self
-                .tree
-                .lock()
-                .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+            let tree = self.tree.lock();
             if let Some(existing) = tree.agents.values().find(|a| {
                 a.name == name && a.lifecycle == AgentLifecycle::Active && a.parent_id.is_none()
             }) {
@@ -200,10 +198,7 @@ impl AgentRegistry {
         let info;
         let next_id_val;
         {
-            let mut tree = self
-                .tree
-                .lock()
-                .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+            let mut tree = self.tree.lock();
             let agent_id = if let Some(ref pid) = parent_id {
                 if !tree.agents.contains_key(pid) {
                     return Err(EnvoyError::AgentNotFound(pid.clone()));
@@ -254,10 +249,7 @@ impl AgentRegistry {
         let mut affected = Vec::new();
         let mut retired_root_ids = Vec::new();
         {
-            let mut tree = self
-                .tree
-                .lock()
-                .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+            let mut tree = self.tree.lock();
             if !tree.agents.contains_key(agent_id) {
                 return Err(EnvoyError::AgentNotFound(agent_id.to_string()));
             }
@@ -288,10 +280,7 @@ impl AgentRegistry {
 
         for id in &affected {
             let info = {
-                let tree = self
-                    .tree
-                    .lock()
-                    .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+                let tree = self.tree.lock();
                 tree.agents.get(id).cloned()
             };
             if let Some(info) = info {
@@ -313,10 +302,7 @@ impl AgentRegistry {
     }
 
     pub fn get(&self, agent_id: &str) -> Result<AgentInfo> {
-        let tree = self
-            .tree
-            .lock()
-            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        let tree = self.tree.lock();
         tree.agents
             .get(agent_id)
             .cloned()
@@ -324,18 +310,12 @@ impl AgentRegistry {
     }
 
     pub fn list_all(&self) -> Result<Vec<AgentInfo>> {
-        let tree = self
-            .tree
-            .lock()
-            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        let tree = self.tree.lock();
         Ok(tree.agents.values().cloned().collect())
     }
 
     pub fn is_active(&self, agent_id: &str) -> Result<bool> {
-        let tree = self
-            .tree
-            .lock()
-            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        let tree = self.tree.lock();
         Ok(tree
             .agents
             .get(agent_id)
@@ -344,10 +324,7 @@ impl AgentRegistry {
     }
 
     pub fn list_active(&self) -> Result<Vec<AgentInfo>> {
-        let tree = self
-            .tree
-            .lock()
-            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        let tree = self.tree.lock();
         Ok(tree
             .agents
             .values()
@@ -357,10 +334,7 @@ impl AgentRegistry {
     }
 
     pub fn get_children(&self, agent_id: &str) -> Result<Vec<AgentInfo>> {
-        let tree = self
-            .tree
-            .lock()
-            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        let tree = self.tree.lock();
         if !tree.agents.contains_key(agent_id) {
             return Err(EnvoyError::AgentNotFound(agent_id.to_string()));
         }
@@ -384,10 +358,7 @@ impl AgentRegistry {
         status: crate::status::AgentStatusSnapshot,
     ) -> Result<()> {
         let timestamp = chrono::Utc::now().to_rfc3339();
-        let mut tree = self
-            .tree
-            .lock()
-            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        let mut tree = self.tree.lock();
         let info = tree
             .agents
             .get_mut(agent_id)
@@ -408,10 +379,7 @@ impl AgentRegistry {
 
     /// Return active agents whose last heartbeat is older than threshold_minutes.
     pub fn get_stale_agents(&self, threshold_minutes: i64) -> Result<Vec<AgentInfo>> {
-        let tree = self
-            .tree
-            .lock()
-            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        let tree = self.tree.lock();
         let now = chrono::Utc::now();
         Ok(tree
             .agents
@@ -435,10 +403,7 @@ impl AgentRegistry {
     /// Remove retired agents that haven't heartbeated in 24+ hours.
     /// Returns the number of purged agents.
     pub fn purge_retired(&self, threshold_hours: i64) -> Result<usize> {
-        let mut tree = self
-            .tree
-            .lock()
-            .map_err(|e| EnvoyError::LockPoisoned(e.to_string()))?;
+        let mut tree = self.tree.lock();
         let now = chrono::Utc::now();
         let before = tree.agents.len();
         let stale_ids: Vec<String> = tree

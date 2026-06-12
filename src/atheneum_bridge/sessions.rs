@@ -69,7 +69,7 @@ pub async fn patch_session(
 pub async fn post_prompt(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecordPromptRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_evidence_prompt(atheneum::graph::PromptParams {
@@ -90,14 +90,14 @@ pub async fn post_prompt(
             .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }
 
 /// POST /atheneum/tool-calls — record a tool call
 pub async fn post_tool_call(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecordToolCallRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_evidence_tool_call(atheneum::graph::ToolCallParams {
@@ -119,14 +119,14 @@ pub async fn post_tool_call(
             .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }
 
 /// POST /atheneum/file-writes — record a file write
 pub async fn post_file_write(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecordFileWriteRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_evidence_file_write(atheneum::graph::FileWriteParams {
@@ -145,14 +145,14 @@ pub async fn post_file_write(
             .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }
 
 /// POST /atheneum/commits — record a commit
 pub async fn post_commit(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecordCommitRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_evidence_commit(atheneum::graph::CommitParams {
@@ -171,14 +171,14 @@ pub async fn post_commit(
             .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }
 
 /// POST /atheneum/test-runs — record a test run
 pub async fn post_test_run(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecordTestRunRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_evidence_test_run(atheneum::graph::TestRunParams {
@@ -195,14 +195,14 @@ pub async fn post_test_run(
             .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }
 
 /// POST /atheneum/fix-chains — record a fix chain
 pub async fn post_fix_chain(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecordFixChainRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_evidence_fix_chain(atheneum::graph::FixChainParams {
@@ -218,14 +218,14 @@ pub async fn post_fix_chain(
             .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }
 
 /// POST /atheneum/bench-runs — record a benchmark run
 pub async fn post_bench_run(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecordBenchRunRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_evidence_bench_run(
@@ -239,14 +239,14 @@ pub async fn post_bench_run(
             .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }
 
 /// POST /atheneum/events — record a generic event
 pub async fn post_event(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecordEventRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_event(atheneum::graph::RecordEventParams {
@@ -259,7 +259,7 @@ pub async fn post_event(
             .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }
 
 /// GET /atheneum/events — query the event log
@@ -305,12 +305,12 @@ pub async fn post_subagent_handover(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Json(req): Json<SubagentHandoverRequest>,
-) -> Result<axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state
         .with_atheneum_async(move |g| {
             g.record_subagent_handover(&session_id, &req.summary, &req.files_changed, &req.outcome)
                 .map_err(crate::error::EnvoyError::from)
         })
         .await?;
-    Ok(axum::http::StatusCode::CREATED)
+    Ok(Json(serde_json::json!({"recorded": true})))
 }

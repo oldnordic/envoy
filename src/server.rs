@@ -38,13 +38,7 @@ pub async fn run_with_atheneum(
             let state_fb = purge_state.clone();
             let (events_purged, deliveries_purged, agents_purged, circuits_evicted) =
                 tokio::task::spawn_blocking(move || {
-                    let engine = match state_fb.engine.lock() {
-                        Ok(g) => g,
-                        Err(e) => {
-                            eprintln!("purge: lock poisoned: {e}");
-                            return (0, 0, 0, 0);
-                        }
-                    };
+                    let engine = state_fb.engine.lock();
                     let ep = state_fb
                         .event_bus
                         .purge_old_events(engine.graph())

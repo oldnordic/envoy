@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::error::{EnvoyError, Result};
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 use crate::http::types::*;
 
 pub(crate) fn info_with_online(info: &crate::agent::AgentInfo) -> serde_json::Value {
@@ -17,7 +17,7 @@ pub(crate) async fn register_agent(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let (info, is_new) = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let existing = state_fb
             .agent_registry
             .list_active()
@@ -60,6 +60,16 @@ pub(crate) async fn register_agent(
     ));
     response["is_new"] = serde_json::json!(is_new);
 
+    if is_new {
+        crate::metrics::set_agents_online(
+            state
+                .agent_registry
+                .list_active()
+                .map(|a| a.len())
+                .unwrap_or(0),
+        );
+    }
+
     Ok((status, Json(response)))
 }
 
@@ -70,7 +80,7 @@ pub(crate) async fn disconnect_agent(
     let state_fb = state.clone();
     let aid = agent_id.clone();
     let affected = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let affected = state_fb.agent_registry.disconnect(engine.graph(), &aid)?;
         let _ = state_fb
             .audit_store
@@ -80,6 +90,13 @@ pub(crate) async fn disconnect_agent(
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     state.circuit_breaker.remove(&agent_id);
+    crate::metrics::set_agents_online(
+        state
+            .agent_registry
+            .list_active()
+            .map(|a| a.len())
+            .unwrap_or(0),
+    );
     Ok(Json(
         serde_json::json!({"disconnected": true, "affected": affected}),
     ))
@@ -92,7 +109,7 @@ pub(crate) async fn retire_agent(
     let state_fb = state.clone();
     let aid = agent_id.clone();
     let affected = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let affected = state_fb.agent_registry.retire(engine.graph(), &aid)?;
         let _ = state_fb
             .audit_store
@@ -102,6 +119,13 @@ pub(crate) async fn retire_agent(
     .await
     .map_err(|_| EnvoyError::InvalidEntity("blocking task join error".into()))??;
     state.circuit_breaker.remove(&agent_id);
+    crate::metrics::set_agents_online(
+        state
+            .agent_registry
+            .list_active()
+            .map(|a| a.len())
+            .unwrap_or(0),
+    );
     Ok(Json(
         serde_json::json!({"retired": true, "affected": affected}),
     ))

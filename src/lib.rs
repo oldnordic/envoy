@@ -15,6 +15,7 @@ pub mod error;
 pub mod event;
 pub mod http;
 pub mod message;
+pub mod metrics;
 pub mod monitor;
 pub mod rate_limit;
 pub mod server;

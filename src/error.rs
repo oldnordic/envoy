@@ -89,9 +89,6 @@ pub enum EnvoyError {
 
     #[error("subscription not found: {0} for project {1}")]
     SubscriptionNotFound(String, String),
-
-    #[error("lock poisoned: {0}")]
-    LockPoisoned(String),
 }
 
 impl IntoResponse for EnvoyError {
@@ -116,7 +113,6 @@ impl IntoResponse for EnvoyError {
             Self::NotTaskClaimant { .. } => (StatusCode::FORBIDDEN, "NOT_TASK_CLAIMANT"),
             Self::ProjectConfigNotFound(_) => (StatusCode::NOT_FOUND, "PROJECT_CONFIG_NOT_FOUND"),
             Self::SubscriptionNotFound(_, _) => (StatusCode::NOT_FOUND, "SUBSCRIPTION_NOT_FOUND"),
-            Self::LockPoisoned(_) => (StatusCode::INTERNAL_SERVER_ERROR, "LOCK_POISONED"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         };
 

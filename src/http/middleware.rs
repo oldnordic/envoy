@@ -3,16 +3,16 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 
 pub async fn rate_limit_middleware(
     State(state): State<SharedState>,
     request: Request,
     next: Next,
 ) -> Response {
-    // Public endpoints: health checks and agent registration bypass auth.
+    // Public endpoints: health checks, metrics, and agent registration bypass auth.
     let path = request.uri().path();
-    let is_health = path == "/health" || path == "/stats";
+    let is_health = path == "/health" || path == "/stats" || path == "/metrics";
     let is_registration = path == "/agents" && request.method() == "POST";
 
     if is_health || is_registration {
@@ -30,7 +30,7 @@ pub async fn rate_limit_middleware(
     }
 
     let decision = {
-        let engine = recover_lock(&state.engine);
+        let engine = state.engine.lock();
         state
             .rate_limiter
             .check_rate_limit(engine.graph(), agent_id)

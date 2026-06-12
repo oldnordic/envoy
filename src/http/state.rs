@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-#[cfg(feature = "atheneum")]
-use parking_lot::Mutex as FastMutex;
+use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
 use crate::agent::AgentRegistry;
@@ -20,16 +19,6 @@ use crate::task::store::TaskStore;
 #[cfg(feature = "atheneum")]
 use atheneum::AtheneumGraph;
 
-pub(crate) fn recover_lock<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match lock.lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            eprintln!("mutex lock poisoned, recovering: {e}");
-            e.into_inner()
-        }
-    }
-}
-
 /// Registry of active WebSocket senders, keyed by agent_id.
 pub(crate) struct WsRegistry {
     senders: Mutex<HashMap<String, broadcast::Sender<String>>>,
@@ -43,7 +32,7 @@ impl WsRegistry {
     }
 
     pub(crate) fn register(&self, agent_id: &str) -> broadcast::Receiver<String> {
-        let mut senders = recover_lock(&self.senders);
+        let mut senders = self.senders.lock();
         if let Some(tx) = senders.get(agent_id) {
             tx.subscribe()
         } else {
@@ -54,7 +43,7 @@ impl WsRegistry {
     }
 
     pub(crate) fn unregister(&self, agent_id: &str) {
-        let mut senders = recover_lock(&self.senders);
+        let mut senders = self.senders.lock();
         senders.remove(agent_id);
     }
 
@@ -68,7 +57,7 @@ impl WsRegistry {
             "event": event_type,
             "data": data
         });
-        let senders = recover_lock(&self.senders);
+        let senders = self.senders.lock();
         if let Some(tx) = senders.get(agent_id) {
             tx.send(event.to_string()).is_ok()
         } else {
@@ -97,7 +86,7 @@ pub struct AppState {
     #[cfg(feature = "atheneum")]
     pub atheneum_path: Option<String>,
     #[cfg(feature = "atheneum")]
-    atheneum_graph: Arc<FastMutex<Option<AtheneumGraph>>>,
+    atheneum_graph: Arc<Mutex<Option<AtheneumGraph>>>,
 }
 
 impl AppState {
@@ -127,7 +116,7 @@ impl AppState {
             #[cfg(feature = "atheneum")]
             atheneum_path: None,
             #[cfg(feature = "atheneum")]
-            atheneum_graph: Arc::new(FastMutex::new(None)),
+            atheneum_graph: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -153,7 +142,7 @@ impl AppState {
     {
         let engine = self.engine.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let engine = recover_lock(&engine);
+            let engine = engine.lock();
             f(engine.graph())
         })
         .await
@@ -169,7 +158,7 @@ impl AppState {
     {
         let engine = self.engine.clone();
         tokio::task::spawn_blocking(move || {
-            let engine = recover_lock(&engine);
+            let engine = engine.lock();
             f(&engine)
         })
         .await
@@ -204,12 +193,12 @@ impl AppState {
 pub async fn run_nudge_loop(state: Arc<AppState>) {
     loop {
         let interval = {
-            let cfg = recover_lock(&state.nudge_config);
+            let cfg = state.nudge_config.lock();
             cfg.check_interval_seconds
         };
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
-        let threshold = recover_lock(&state.nudge_config).stale_threshold_minutes;
+        let threshold = state.nudge_config.lock().stale_threshold_minutes;
         let stale = match state.agent_registry.get_stale_agents(threshold) {
             Ok(s) => s,
             Err(e) => {
@@ -237,7 +226,7 @@ pub async fn run_nudge_loop(state: Arc<AppState>) {
             let state_fb = state.clone();
             let agent_id_fb = agent.agent_id.clone();
             let (deps, reclaimed) = tokio::task::spawn_blocking(move || {
-                let engine = recover_lock(&state_fb.engine);
+                let engine = state_fb.engine.lock();
                 let deps = state_fb
                     .dependency_store
                     .find_by_blocker(engine.graph(), &agent_id_fb)

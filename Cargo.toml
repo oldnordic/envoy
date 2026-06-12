@@ -1,6 +1,6 @@
 [package]
 name = "agent-envoy"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Message/coordination server for AI coding agents using sqlitegraph pub/sub"
 license = "GPL-3.0-only"
@@ -24,12 +24,14 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "request-id", "trace", "timeout", "util"] }
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 ahash = "0.8"
 parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
 atheneum = { path = "../atheneum/crates/atheneum", version = "0.5.0", optional = true }
 ureq = { version = "2", default-features = false, features = ["json"] }
 

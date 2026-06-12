@@ -279,6 +279,8 @@ curl http://127.0.0.1:9876/health
 }
 ```
 
+Every response also includes an `x-request-id` header (a UUID) for log correlation. This lets you trace a request through envoy's logs by its unique ID.
+
 ### Stats
 
 ```bash
@@ -291,6 +293,64 @@ curl http://127.0.0.1:9876/stats
   "agents_registered": 5
 }
 ```
+
+### Prometheus Metrics
+
+Envoy exposes a `/metrics` endpoint in Prometheus exposition format. No authentication required -- it's a public endpoint, just like `/health`.
+
+```bash
+curl http://127.0.0.1:9876/metrics
+```
+
+Example output:
+
+```
+# HELP envoy_requests_total Total HTTP requests processed, labeled by operation and status class
+# TYPE envoy_requests_total counter
+envoy_requests_total{method="GET",path="/health",status="2xx"} 14
+envoy_requests_total{method="POST",path="/messages",status="2xx"} 7
+
+# HELP envoy_agents_online Number of currently active agents
+# TYPE envoy_agents_online gauge
+envoy_agents_online 3
+
+# HELP envoy_request_duration_ms Request latency in milliseconds, labeled by operation
+# TYPE envoy_request_duration_ms histogram
+envoy_request_duration_ms_bucket{path="/health",le="0.5"} 14
+envoy_request_duration_ms_sum{path="/health"} 0.821
+envoy_request_duration_ms_count{path="/health"} 14
+```
+
+**What the metrics mean:**
+
+| Metric | Type | Labels | What it tells you |
+|--------|------|--------|-------------------|
+| `envoy_requests_total` | counter | `method`, `path`, `status` | How many HTTP requests, broken down by method (GET/POST/DELETE), normalized path, and status class (2xx/4xx/5xx) |
+| `envoy_request_duration_ms` | histogram | `path` | Request latency. Buckets: 0.5ms, 1ms, 5ms, 10ms, 50ms, 100ms, 500ms, 1s, 5s |
+| `envoy_agents_online` | gauge | (none) | Number of currently active agents |
+
+**Path normalization:** URL segments that look like IDs (numeric like `42`, named like `id1121`, or UUIDs like `338b8adc-6c08-4664-af1d-69300e7c576a`) are collapsed to `:id`. This prevents cardinality explosion -- you get `/agents/:id/messages` instead of a different label for every agent.
+
+**Prometheus scrape config:**
+
+```yaml
+scrape_configs:
+  - job_name: 'envoy'
+    static_configs:
+      - targets: ['127.0.0.1:9876']
+    scrape_interval: 15s
+    metrics_path: /metrics
+```
+
+### Request Tracing
+
+Every HTTP response includes an `x-request-id` header with a unique UUID. To see trace-level logs for requests, set:
+
+```bash
+RUST_LOG=tower_http=debug envoy
+```
+
+This logs each request's method, path, status code, and latency -- tagged with the request ID so you can correlate logs to specific requests.
 
 ## Database
 

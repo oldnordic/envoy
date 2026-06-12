@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::error::{EnvoyError, Result};
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 // ── Subscription handlers ──
 
 pub(crate) async fn subscribe_agent(
@@ -23,7 +23,7 @@ pub(crate) async fn subscribe_agent(
     let aid = agent_id.to_string();
     let proj = project.to_string();
     tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .subscription_store
             .subscribe(engine.graph(), &aid, &proj)
@@ -42,7 +42,7 @@ pub(crate) async fn unsubscribe_agent(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .subscription_store
             .unsubscribe(engine.graph(), &agent_id, &project)
@@ -59,7 +59,7 @@ pub(crate) async fn list_subscriptions(
     let state_fb = state.clone();
     let aid = agent_id.clone();
     let subs = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.subscription_store.list(engine.graph(), &aid)
     })
     .await

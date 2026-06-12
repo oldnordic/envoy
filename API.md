@@ -1,361 +1,494 @@
 # Envoy API Reference
 
-Base URL: `http://127.0.0.1:9876`
+All endpoints live at `http://127.0.0.1:9876`. Most require an `X-Agent-Id`
+header identifying the calling agent.
 
-All request and response bodies are JSON. Errors use the format:
+---
+
+## Core Endpoints
+
+### `GET /health`
+
+Health check. No auth required.
+
 ```json
-{ "error": { "code": "ERROR_CODE", "message": "human description" } }
+{"status":"ok","uptime_seconds":152986,"agents_online":2}
+```
+
+### `GET /stats`
+
+Server statistics (messages, agents, events, token counters).
+
+### `GET /metrics`
+
+Prometheus metrics endpoint. No auth required (public, like `/health`).
+
+Returns Prometheus exposition format text with:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `envoy_requests_total` | counter | `method`, `path`, `status` | Total HTTP requests by method, normalized path, and status class (2xx/4xx/5xx) |
+| `envoy_request_duration_ms` | histogram | `path` | Request latency in milliseconds. Buckets: 0.5, 1, 5, 10, 50, 100, 500, 1000, 5000 |
+| `envoy_agents_online` | gauge | (none) | Number of currently active agents |
+| `envoy_messages_pending` | gauge | (none) | Reserved for future use (currently always 0) |
+| `envoy_ws_connections` | gauge | (none) | Reserved for future use (currently always 0) |
+
+Path segments that look like IDs (numeric, `id*` prefix, or UUID format) are collapsed to `:id` to prevent cardinality explosion. For example, `/agents/id1/messages/42/ack` becomes `/agents/:id/messages/:id/ack`.
+
+Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: 'envoy'
+    static_configs:
+      - targets: ['127.0.0.1:9876']
+    scrape_interval: 15s
+    metrics_path: /metrics
 ```
 
 ---
 
-## Agents
+## Agent Lifecycle
 
-### `POST /agents` — Register an agent
+### `POST /agents` -- Register
 
-**Request:**
+Registers a new agent or returns an existing one (idempotent by name).
+
+**Request body:**
+
+| Field       | Type   | Required | Notes                              |
+|-------------|--------|----------|------------------------------------|
+| `name`      | string | yes      | Human-readable name                |
+| `kind`      | string | yes      | Agent type (e.g. "claude", "hermes") |
+| `parent_id` | string | no       | Parent agent ID for subagents      |
+
+**Response (200):**
+
 ```json
 {
-  "name": "claude",
-  "kind": "claude",
-  "parent_id": null
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | yes | Human-readable label (non-unique) |
-| `kind` | string | yes | Agent platform: `"claude"`, `"hermes"`, etc. |
-| `parent_id` | string \| null | no | Parent agent ID. Omit or `null` for root agents. |
-
-**Response** `201 Created`:
-```json
-{
-  "agent_id": "id1",
-  "name": "claude",
-  "kind": "claude",
-  "parent_id": null,
-  "online": true
-}
-```
-
-Subagents get dot-notation IDs. If parent is `"id1"`, the first child is `"id1.1"`,
-the second `"id1.2"`, and a grandchild is `"id1.1.1"`.
-
-**Errors:** `409 AGENT_ALREADY_EXISTS`, `404 AGENT_NOT_FOUND` (parent), `409 AGENT_OFFLINE` (parent)
-
----
-
-### `GET /agents` — List all agents
-
-**Response** `200 OK`:
-```json
-{
-  "agents": [
-    {
-      "agent_id": "id1",
-      "name": "claude",
-      "kind": "claude",
-      "parent_id": null,
-      "online": true
-    },
-    {
-      "agent_id": "id2",
-      "name": "hermes",
-      "kind": "hermes",
-      "parent_id": null,
-      "online": true
-    }
-  ]
-}
-```
-
----
-
-### `GET /agents/{agent_id}` — Get agent detail
-
-**Response** `200 OK`:
-```json
-{
-  "agent_id": "id1",
-  "name": "claude",
-  "kind": "claude",
-  "parent_id": null,
+  "agent_id": "id1117",
+  "is_new": true,
+  "kind": "hermes",
+  "name": "claude-main",
   "online": true,
-  "children": ["id1.1", "id1.2"]
+  "parent_id": null,
+  "lifecycle": "active"
 }
 ```
 
-**Errors:** `404 AGENT_NOT_FOUND`
+The response `agent_id` must be used as `X-Agent-Id` in all subsequent calls.
+Subagents receive hierarchical IDs (e.g. parent `id1` -> child `id1.1`).
+
+### `GET /agents` -- List agents
+
+Requires `X-Agent-Id` header.
+
+### `GET /agents/{agent_id}` -- Get agent details
+
+### `DELETE /agents/{agent_id}` -- Disconnect agent
+
+### `POST /agents/{agent_id}/retire` -- Retire agent
+
+Cascades to all children.
+
+**Request body:** `{"agent_id": "id1117"}`
+
+**Response:** `{"affected": ["id1117", "id1117.1"], "retired": true}`
+
+### `POST /heartbeat`
+
+Keep-alive ping.
 
 ---
 
-### `DELETE /agents/{agent_id}` — Disconnect agent
+## Messaging
 
-Marks the agent and all descendants offline. Cascade is depth-first: disconnect
-recurses through all children in the hierarchy tree.
+Messages use a **poll-based** model. There is no push/WebSocket notification
+for incoming messages -- agents must poll `/agents/{id}/messages/pending`
+periodically. This is a known limitation inherited from the MCP query-based
+interface.
 
-**Response** `200 OK`:
-```json
-{
-  "disconnected": true,
-  "affected": ["id1", "id1.1", "id1.1.1"]
-}
-```
+### `POST /messages` -- Send message
 
-**Errors:** `404 AGENT_NOT_FOUND`
+**Request body:**
 
----
+| Field  | Type   | Required | Notes                     |
+|--------|--------|----------|---------------------------|
+| `from` | string | yes      | Sender agent ID           |
+| `to`   | string | yes      | Recipient agent ID        |
+| `type` | string | yes      | "direct" or "broadcast"   |
+| `parts`| array  | yes      | Message parts (see below) |
 
-### `GET /agents/{agent_id}/messages/pending` — Tombstone endpoint
+Each part is a flat object: `{"text": "message content"}`.
 
-Returns undelivered messages for a disconnected agent. Messages are preserved even
-after the agent goes offline.
+**Response:** `{"message_id": "6751", "status": "delivered"}`
 
-**Response** `200 OK`:
-```json
-{
-  "messages": [
-    {
-      "message_id": "3",
-      "type": "handoff",
-      "from": "id1.1",
-      "to": "id1",
-      "task_id": "task-003",
-      "context_id": "ctx-001",
-      "timestamp": "2026-05-05T22:49:09.353+00:00",
-      "sequence_id": 1,
-      "parts": [
-        {"text": "context at 28%, handing off"},
-        {"data": { "completion_status": "NEEDS_CONTEXT", ... }}
-      ]
-    }
-  ],
-  "count": 1
-}
-```
+### `GET /agents/{agent_id}/messages/pending` -- Poll for messages
+
+Returns undelivered messages for this agent.
+
+### `GET /messages/{message_id}` -- Get message details
+
+### `POST /messages/{message_id}/ack` -- Acknowledge message
+
+**Request body:** `{"agent_id": "id1114"}`
+
+**Response:** `{"acked_by": ["id1114"], "message_id": "6751"}`
 
 ---
 
-## Messages
+## Circuit Breaker
 
-### `POST /messages` — Send a message
+### `GET /agents/{agent_id}/circuit`
 
-**Request:**
+Circuit breaker status for an agent.
+
+### `POST /agents/{agent_id}/circuit/failure`
+
+Record a circuit breaker failure event.
+
+---
+
+## Atheneum Sessions
+
+All session/evidence endpoints are prefixed with `/atheneum/`.
+
+### `POST /atheneum/sessions` -- Create session
+
+**Request body:**
+
+| Field              | Type   | Required | Notes                    |
+|--------------------|--------|----------|--------------------------|
+| `session_id`       | string | yes      | UUID, generated by client |
+| `agent`            | string | yes      | Agent name               |
+| `project`          | string | yes      | Project name             |
+| `tool`             | string | no       | Default: "cli"           |
+| `trigger`          | string | no       | Default: "manual"        |
+| `model`            | string | no       | Model identifier         |
+| `git_branch`       | string | no       | Current git branch       |
+| `git_head`         | string | no       | Current HEAD commit SHA  |
+| `parent_session_id`| string | no       | Parent session for subagents |
+
+**Response:** `{"session_id": "...", "recorded": true}`
+
+### `GET /atheneum/sessions` -- Query sessions
+
+**Query params:** `project`, `last` (default 5), `parent_id`
+
+### `PATCH /atheneum/sessions/{id}/end` -- End session
+
+**Request body:**
+
+| Field                | Type   | Required |
+|----------------------|--------|----------|
+| `exit_status`        | string | yes      |
+| `prompt_count`       | u32    | no       |
+| `tool_call_count`    | u32    | no       |
+| `file_write_count`   | u32    | no       |
+| `commit_count`       | u32    | no       |
+| `test_run_count`     | u32    | no       |
+| `total_input_tokens` | u64    | no       |
+| `total_output_tokens`| u64    | no       |
+| `total_cost_usd`     | f64    | no       |
+
+**Response:** `{"status": "ended", "session_id": "..."}`
+
+### `POST /atheneum/sessions/{id}/handover` -- Subagent handover
+
+**Request body:**
+
+| Field          | Type     | Required | Notes              |
+|----------------|----------|----------|--------------------|
+| `summary`      | string   | yes      | What was done      |
+| `files_changed`| string[] | no       | Files modified     |
+| `outcome`      | string   | no       | Default: "complete" |
+
+**Response:** `{"recorded": true}`
+
+---
+
+## Evidence Recording
+
+All evidence endpoints return `{"recorded": true}` on success.
+
+### `POST /atheneum/prompts` -- Record a prompt
+
+| Field           | Type   | Required |
+|-----------------|--------|----------|
+| `session_id`    | string | yes      |
+| `role`          | string | yes      |
+| `sequence`      | u32    | no       |
+| `input_hash`    | string | yes      |
+| `input_tokens`  | u64    | no       |
+| `output_hash`   | string | no       |
+| `output_tokens` | u64    | no       |
+| `latency_ms`    | u64    | no       |
+| `model`         | string | no       |
+| `cost_usd`      | f64    | no       |
+
+### `POST /atheneum/tool-calls` -- Record a tool call
+
+| Field             | Type   | Required |
+|-------------------|--------|----------|
+| `session_id`      | string | yes      |
+| `tool_name`       | string | yes      |
+| `tool_version`    | string | no       |
+| `input_hash`      | string | no       |
+| `input_summary`   | string | no       |
+| `output_hash`     | string | no       |
+| `output_summary`  | string | no       |
+| `exit_status`     | string | yes      |
+| `latency_ms`      | u64    | no       |
+| `input_tokens_est`| u64    | no       |
+| `tool_category`   | string | no       |
+
+### `POST /atheneum/file-writes` -- Record a file write
+
+| Field          | Type   | Required |
+|----------------|--------|----------|
+| `session_id`   | string | yes      |
+| `file_path`    | string | yes      |
+| `file_id`      | string | no       |
+| `before_hash`  | string | no       |
+| `after_hash`   | string | no       |
+| `lines_added`  | u32    | no       |
+| `lines_deleted`| u32    | no       |
+| `lines_changed`| u32    | no       |
+| `write_type`   | string | no       |
+
+### `POST /atheneum/commits` -- Record a commit
+
+| Field           | Type   | Required |
+|-----------------|--------|----------|
+| `session_id`    | string | yes      |
+| `commit_sha`    | string | yes      |
+| `parent_sha`    | string | no       |
+| `message`       | string | yes      |
+| `author`        | string | yes      |
+| `files_changed` | u32    | no       |
+| `lines_inserted`| u32    | no       |
+| `lines_deleted` | u32    | no       |
+| `commit_type`   | string | yes      |
+| `feature_tag`   | string | no       |
+
+### `POST /atheneum/test-runs` -- Record a test run
+
+| Field           | Type   | Required |
+|-----------------|--------|----------|
+| `session_id`    | string | yes      |
+| `test_name`     | string | yes      |
+| `test_suite`    | string | no       |
+| `test_command`  | string | no       |
+| `result`        | string | yes      |
+| `duration_ms`   | u64    | no       |
+| `logs_summary`  | string | no       |
+| `commit_sha`    | string | no       |
+
+### `POST /atheneum/fix-chains` -- Record a fix chain
+
+| Field            | Type   | Required |
+|------------------|--------|----------|
+| `session_id`     | string | yes      |
+| `bug_commit_sha` | string | yes      |
+| `fix_commit_sha` | string | yes      |
+| `fix_type`       | string | yes      |
+| `severity`       | string | yes      |
+| `cycles_to_fix`  | u32    | no       |
+| `time_to_fix_ms` | u64    | no       |
+
+### `POST /atheneum/bench-runs` -- Record a benchmark run
+
+| Field          | Type | Required |
+|----------------|------|----------|
+| `session_id`   | string | yes    |
+| `bench_name`   | string | yes    |
+| `mean_ns`      | i64    | no     |
+| `median_ns`    | i64    | no     |
+| `p95_ns`       | i64    | no     |
+| `is_regression`| bool   | no     |
+
+### `POST /atheneum/events` -- Record a generic event
+
+| Field        | Type   | Required |
+|--------------|--------|----------|
+| `session_id` | string | yes      |
+| `event_type` | string | yes      |
+| `entity_id`  | string | yes      |
+| `payload`    | object | yes      |
+
+### `GET /atheneum/events` -- Query events
+
+**Query params:** `session_id`, `event_type`, `limit` (default 50)
+
+---
+
+## Discoveries & Knowledge
+
+### `POST /atheneum/discoveries` -- Create discovery
+
+| Field            | Type   | Required |
+|------------------|--------|----------|
+| `agent`          | string | yes      |
+| `discovery_type` | string | yes      |
+| `target`         | string | yes      |
+| `metadata`       | object | no       |
+
+**Response:** `{"discovery_id": 7502, "agent": "...", "target": "...", "discovery_type": "..."}`
+
+### `GET /atheneum/discoveries` -- List discoveries
+
+### `GET /atheneum/knowledge` -- Query knowledge base
+
+### `GET /atheneum/search` -- Search knowledge
+
+### `GET /atheneum/context` -- Get project context
+
+**Query params:** `project`, `limit`
+
+---
+
+## Cross-Project Navigation
+
+### `GET /atheneum/cross/search` -- Cross-project symbol search
+
+**Query params:** `q`, `language`, `k` (default 5)
+
+Searches symbols across all registered project databases.
+
+**Response:**
+
 ```json
 {
-  "type": "direct",
-  "from": "id1",
-  "to": "id2",
-  "task_id": null,
-  "context_id": null,
-  "parts": [
-    {"text": "Hello, can you review PR #42?"},
-    {"data": {"priority": "high"}},
-    {"url": "https://github.com/org/repo/pull/42"}
+  "query": "build_router",
+  "language": "rust",
+  "count": 3,
+  "results": [
+    {"project": "envoy", "id": 25495, "kind": "Symbol", "name": "build_router", ...}
   ]
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | string | yes | `"direct"`, `"handoff"`, `"heartbeat"`, `"system"` |
-| `from` | string | yes | Sender agent ID (must be online) |
-| `to` | string | yes | Recipient agent ID (must exist) |
-| `task_id` | string \| null | no | Optional task correlation |
-| `context_id` | string \| null | no | Optional context session tracking |
-| `parts` | Part[] | yes | At least 1, max 20 parts |
+### `GET /atheneum/cross/navigate` -- Cross-project graph walk
 
-**Part types:**
+**Query params:** `q`, `language`, `k` (default 5), `depth` (default 1)
 
-| Variant | JSON | Example |
-|---------|------|---------|
-| Text | `{"text": "..."}` | `{"text": "hello"}` |
-| Data | `{"data": {...}}` | `{"data": {"status": "working"}}` |
-| Url | `{"url": "..."}` | `{"url": "https://..."}` |
+BFS from search hits into per-project subgraphs. Returns entities and edges.
 
-**Response** `201 Created` — The stored message envelope with server-assigned fields:
+**Response:**
+
 ```json
 {
-  "message_id": "1",
-  "type": "direct",
-  "from": "id1",
-  "to": "id2",
-  "task_id": null,
-  "context_id": null,
-  "timestamp": "2026-05-05T22:48:57.592+00:00",
-  "sequence_id": 1,
-  "parts": [
-    {"text": "Hello, can you review PR #42?"}
+  "count": 1,
+  "views": [
+    {
+      "project": "envoy",
+      "entry_id": 25495,
+      "entities": [...],
+      "edges": [{"id": 31638, "kind": "CALLER", "from_id": 25495, "to_id": 25518}]
+    }
   ]
 }
 ```
 
-Server-assigned fields:
-- `message_id` — Row ID from SQLite
-- `timestamp` — RFC 3339 UTC timestamp
-- `sequence_id` — Per-recipient monotonic sequence number
+---
 
-**Side effect:** If the recipient has an active WebSocket connection, the message
-is pushed as a `{"event":"message","data":{...}}` frame.
+## Graph Navigation
 
-**Errors:** `404 AGENT_NOT_FOUND` (sender or recipient), `409 AGENT_OFFLINE` (sender),
-`400 INVALID_MESSAGE`, `400 MESSAGE_TOO_LARGE`, `400 TOO_MANY_PARTS`
+### `GET /atheneum/graph/stats` -- Graph statistics
+
+Returns entity count, edge count, and per-kind breakdowns.
+
+### `GET /atheneum/graph/entity/{id}` -- Get entity by ID
+
+### `GET /atheneum/graph/entity/{id}/neighbors` -- Get neighbors
+
+Returns incoming and outgoing edges for an entity.
+
+### `GET /atheneum/graph/subgraph/{id}` -- BFS subgraph view
+
+**Query params:** `depth` (default 2)
 
 ---
 
-### `GET /messages?to={agent_id}&since={seq}&limit={n}` — Poll messages
+## Handoffs (Inter-Agent Work Transfer)
 
-Cursor-based polling for a recipient's messages.
+### `POST /atheneum/handoffs` -- Create handoff
 
-**Query parameters:**
+### `GET /atheneum/handoffs/pending` -- Get pending handoff
 
-| Param | Type | Default | Description |
-|-------|------|---------|-------------|
-| `to` | string | (required) | Recipient agent ID |
-| `since` | integer | `0` | Return messages with `sequence_id > since` |
-| `limit` | integer | `50` | Max messages to return (capped at 100) |
-
-**Response** `200 OK`:
-```json
-{
-  "messages": [
-    {
-      "message_id": "1",
-      "type": "direct",
-      "from": "id1",
-      "to": "id2",
-      "task_id": null,
-      "context_id": null,
-      "timestamp": "2026-05-05T22:48:57.592+00:00",
-      "sequence_id": 1,
-      "parts": [{"text": "Hello"}]
-    }
-  ],
-  "latest_sequence": 1
-}
-```
-
-Use `latest_sequence` as `since` in the next poll for continuous iteration:
-```bash
-# First poll
-curl "http://127.0.0.1:9876/messages?to=id2&since=0"
-# → latest_sequence: 1
-
-# Next poll
-curl "http://127.0.0.1:9876/messages?to=id2&since=1"
-# → returns only messages with sequence_id > 1
-```
-
-**Errors:** `404 AGENT_NOT_FOUND` (recipient)
+### `POST /atheneum/handoffs/{id}/claim` -- Claim a handoff
 
 ---
 
-### `GET /messages/{message_id}` — Get a single message
+## Tasks
 
-**Response** `200 OK` — Full `MessageEnvelope` as above.
+### `POST /atheneum/tasks` -- Create task
 
-**Errors:** `404 MESSAGE_NOT_FOUND`
+### `GET /atheneum/tasks` -- List tasks
+
+### `GET /atheneum/tasks/{id}` -- Task details
+
+### `PATCH /atheneum/tasks/{id}/status` -- Update task status
+
+### `POST /atheneum/tasks/{id}/requirements` -- Add requirement to task
+
+---
+
+## Event Ingestion
+
+### `POST /events/hook` -- Hook event (envoy-hook)
+
+### `POST /events/gate` -- Quality gate event
+
+### `POST /events/ci` -- CI event
+
+### `POST /events/doc` -- Documentation event
+
+### `POST /events/verify` -- Verification event
+
+### `GET /events` -- Query all events
+
+### `GET /audit` -- Query audit trail
+
+---
+
+## Dependencies
+
+### `POST /dependencies` -- Create dependency
+
+### `GET /dependencies/blocker/{agent_id}` -- Get blockers
+
+### `GET /dependencies/dependent/{agent_id}` -- Get dependents
+
+### `POST /dependencies/{dep_id}/resolve` -- Resolve dependency
+
+---
+
+## Configuration
+
+### `GET /nudge-config` -- Get nudge configuration
+
+### `POST /nudge-config` -- Update nudge configuration
+
+### `GET /projects/{name}/config` -- Get project config
+
+### `POST /projects/{name}/config` -- Set project config
+
+---
+
+## Subscriptions
+
+### `POST /subscriptions` -- Subscribe agent to project events
+
+### `GET /subscriptions/{agent_id}` -- List subscriptions
+
+### `DELETE /subscriptions/{agent_id}/{project}` -- Unsubscribe
 
 ---
 
 ## WebSocket
 
-### `GET /ws/{agent_id}` — WebSocket upgrade
+### `GET /ws/{agent_id}` -- WebSocket connection
 
-Upgrades the HTTP connection to a WebSocket for real-time event push. The agent
-must be registered and online.
-
-**Events received by the client:**
-
-#### 1. Catch-up messages (on connect)
-
-All undelivered messages for the agent are sent first, up to 100:
-
-```json
-{
-  "event": "message",
-  "data": {
-    "message_id": "3",
-    "type": "handoff",
-    "from": "id1.1",
-    "to": "id1",
-    "task_id": "task-003",
-    "context_id": "ctx-001",
-    "timestamp": "2026-05-05T22:49:09.353+00:00",
-    "sequence_id": 1,
-    "parts": [...]
-  }
-}
-```
-
-#### 2. Connected event
-
-Sent after catch-up completes:
-
-```json
-{
-  "event": "agent_connected",
-  "data": {
-    "agent_id": "id1"
-  }
-}
-```
-
-#### 3. Real-time messages
-
-Pushed whenever a message is sent to this agent via `POST /messages`:
-
-```json
-{
-  "event": "message",
-  "data": { ... }
-}
-```
-
-**Client-to-server:** Text frames are accepted as heartbeats (acknowledged
-silently). The connection is kept open until either side closes.
-
-**Errors:** `409 AGENT_OFFLINE` (HTTP response before upgrade)
-
----
-
-## Health & Stats
-
-### `GET /health`
-
-**Response** `200 OK`:
-```json
-{
-  "status": "ok",
-  "uptime_seconds": 7243,
-  "agents_online": 3
-}
-```
-
-### `GET /stats`
-
-**Response** `200 OK`:
-```json
-{
-  "messages_total": 42,
-  "agents_registered": 5
-}
-```
-
----
-
-## Error Reference
-
-| HTTP Status | Error Code | When |
-|-------------|------------|------|
-| 400 | `INVALID_MESSAGE` | Empty parts, bad handoff status |
-| 400 | `MESSAGE_TOO_LARGE` | Text part > 1 MB |
-| 400 | `TOO_MANY_PARTS` | More than 20 parts |
-| 400 | `SERIALIZATION_ERROR` | Malformed JSON body |
-| 404 | `AGENT_NOT_FOUND` | Agent ID doesn't exist |
-| 404 | `MESSAGE_NOT_FOUND` | Message ID doesn't exist |
-| 404 | `CHANNEL_NOT_FOUND` | Channel name/id doesn't exist |
-| 409 | `AGENT_OFFLINE` | Agent is disconnected |
-| 409 | `AGENT_ALREADY_EXISTS` | Duplicate agent name |
-| 500 | `INTERNAL_ERROR` | Graph, database, or WebSocket infrastructure error |
+Upgrade to WebSocket for real-time events. The standard MCP interface is
+poll-based (no push), so this endpoint exists for future use.

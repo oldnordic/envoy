@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::error::{EnvoyError, Result};
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 use crate::http::types::*;
 pub(crate) async fn health(State(state): State<SharedState>) -> impl IntoResponse {
     let uptime = (chrono::Utc::now() - state.start_time).num_seconds();
@@ -23,7 +23,7 @@ pub(crate) async fn health(State(state): State<SharedState>) -> impl IntoRespons
 pub(crate) async fn stats(State(state): State<SharedState>) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let total = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .message_store
             .count_all(engine.graph())

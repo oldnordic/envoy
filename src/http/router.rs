@@ -1,4 +1,6 @@
 use axum::{routing::get, Router};
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::TraceLayer;
 
 use crate::http::handlers::*;
 use crate::http::middleware::rate_limit_middleware;
@@ -70,6 +72,7 @@ fn build_base_routes() -> Router<SharedState> {
             get(get_project_config).post(set_project_config),
         )
         .route("/ws/{agent_id}", get(ws_handler))
+        .route("/metrics", get(crate::metrics::metrics_endpoint))
 }
 
 #[cfg(feature = "atheneum")]
@@ -77,7 +80,7 @@ fn add_atheneum_routes(routes: Router<SharedState>) -> Router<SharedState> {
     crate::atheneum_bridge::add_atheneum_routes(routes)
 }
 
-/// Build the envoy HTTP router with rate limiting.
+/// Build the envoy HTTP router with rate limiting, request tracing, and request IDs.
 pub fn build_router(state: SharedState) -> Router {
     let routes = build_base_routes();
 
@@ -90,6 +93,12 @@ pub fn build_router(state: SharedState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state,
             rate_limit_middleware,
+        ))
+        .layer(TraceLayer::new_for_http())
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(axum::middleware::from_fn(
+            crate::metrics::metrics_middleware,
         ))
 }
 

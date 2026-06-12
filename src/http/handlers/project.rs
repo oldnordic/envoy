@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::error::{EnvoyError, Result};
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 use crate::monitor::ProjectConfig;
 // ── Project config handlers ──
 
@@ -13,7 +13,7 @@ pub(crate) async fn get_project_config(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let cfg = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.project_config_store.get(engine.graph(), &project)
     })
     .await
@@ -30,7 +30,7 @@ pub(crate) async fn set_project_config(
     cfg.project = project.clone();
     let state_fb = state.clone();
     tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.project_config_store.set(engine.graph(), &cfg)
     })
     .await

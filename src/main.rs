@@ -35,6 +35,9 @@ async fn main() {
 
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
 
+    // Initialize Prometheus metrics recorder (idempotent via LazyLock)
+    envoy::metrics::init();
+
     let result = if atheneum_path.is_some() {
         server::run_with_atheneum(&db_path, addr, atheneum_path).await
     } else {

@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::error::{EnvoyError, Result};
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 use crate::http::types::*;
 pub(crate) async fn heartbeat(
     State(state): State<SharedState>,
@@ -15,7 +15,7 @@ pub(crate) async fn heartbeat(
     // Offload DB work to blocking pool — clone Arc<AppState> for the closure
     let state_for_blocking = state.clone();
     let deps = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_for_blocking.engine);
+        let engine = state_for_blocking.engine.lock();
         state_for_blocking
             .agent_registry
             .heartbeat(engine.graph(), &agent_id, status)?;
@@ -84,7 +84,7 @@ pub(crate) async fn create_dependency(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let dep = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.dependency_store.create(
             engine.graph(),
             req.dependent_agent,
@@ -103,7 +103,7 @@ pub(crate) async fn get_blocker_deps(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let deps = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .dependency_store
             .find_by_blocker(engine.graph(), &agent_id)
@@ -121,7 +121,7 @@ pub(crate) async fn get_dependent_deps(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let deps = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .dependency_store
             .find_by_dependent(engine.graph(), &agent_id)
@@ -139,7 +139,7 @@ pub(crate) async fn resolve_dependency(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let dep = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.dependency_store.resolve(engine.graph(), &dep_id)
     })
     .await
@@ -160,7 +160,7 @@ pub(crate) async fn update_nudge_config(
     State(state): State<SharedState>,
     Json(cfg): Json<crate::status::NudgeConfig>,
 ) -> Result<impl IntoResponse> {
-    let mut current = recover_lock(&state.nudge_config);
+    let mut current = state.nudge_config.lock();
     *current = cfg.clone();
     Ok(Json(cfg))
 }
@@ -168,10 +168,6 @@ pub(crate) async fn update_nudge_config(
 pub(crate) async fn get_nudge_config(
     State(state): State<SharedState>,
 ) -> Result<impl IntoResponse> {
-    let cfg = state
-        .nudge_config
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let cfg = state.nudge_config.lock().clone();
     Ok(Json(cfg))
 }

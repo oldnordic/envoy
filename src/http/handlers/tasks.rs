@@ -4,7 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::error::{EnvoyError, Result};
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 use crate::http::ws::broadcast_to_project;
 use crate::task::{self, TaskState};
 // ── Task handlers ──
@@ -15,7 +15,7 @@ pub(crate) async fn propose_task(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.task_store.propose(
             engine.graph(),
             req.project.clone(),
@@ -43,7 +43,7 @@ pub(crate) async fn claim_task(
     let state_fb = state.clone();
     let tid = task_id.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let task = state_fb
             .task_store
             .claim(engine.graph(), &tid, req.agent_id.clone())?;
@@ -70,7 +70,7 @@ pub(crate) async fn claim_next_task(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .task_store
             .claim_next(engine.graph(), &req.project, req.agent_id)
@@ -97,7 +97,7 @@ pub(crate) async fn update_task_state(
     let state_fb = state.clone();
     let tid = task_id.clone();
     let (task, blocked) = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let task = state_fb.task_store.update_state(
             engine.graph(),
             &tid,
@@ -153,7 +153,7 @@ pub(crate) async fn list_tasks(
     let state_fb = state.clone();
     let project = params.project.clone();
     let tasks = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .task_store
             .list(engine.graph(), &project, filter.as_ref())
@@ -172,7 +172,7 @@ pub(crate) async fn get_task(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.task_store.get(engine.graph(), &task_id)
     })
     .await

@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::error::{EnvoyError, Result};
 use crate::event::{self, EventSeverity, EventType};
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 use crate::http::ws::broadcast_to_project;
 // ── Event handlers ──
 
@@ -22,7 +22,7 @@ pub(crate) async fn ingest_hook_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -67,7 +67,7 @@ pub(crate) async fn ingest_gate_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -112,7 +112,7 @@ pub(crate) async fn ingest_ci_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -163,7 +163,7 @@ pub(crate) async fn ingest_doc_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -207,7 +207,7 @@ pub(crate) async fn ingest_verify_event(
     };
     let state_fb = state.clone();
     let event = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let event = state_fb.event_bus.ingest(
             engine.graph(),
             req.project.clone(),
@@ -267,7 +267,7 @@ pub(crate) async fn query_events(
     let since = params.since.clone();
     let limit = params.limit.unwrap_or(50).min(100);
     let events = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .event_bus
             .query(engine.graph(), &project, since.as_deref(), Some(limit))
@@ -301,7 +301,7 @@ pub(crate) async fn query_audit(
     let state_fb = state.clone();
     let limit = params.limit.unwrap_or(50).min(100);
     let events = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.audit_store.query(
             engine.graph(),
             params.agent_id.as_deref(),
@@ -325,7 +325,7 @@ pub(crate) async fn query_task_audit(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let events = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .audit_store
             .query(engine.graph(), None, None, Some(&task_id), None, Some(50))

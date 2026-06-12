@@ -67,6 +67,8 @@ Envoy gives AI coding agents what language-model vendors don't ship:
 | No subagent accountability | Parent/child sessions, handover notes written on stop |
 | No knowledge sharing | Discoveries, decisions, task state persisted across sessions |
 | No multi-agent coordination | Pub/sub messaging, tasks, circuit breakers, dependencies |
+| No cross-project code search | Search symbols across all magellan-indexed projects from one endpoint |
+| No observability | Prometheus `/metrics` endpoint (request counts, latency histograms, agent gauges), request tracing via `x-request-id` headers |
 
 ## Core Concepts
 
@@ -120,6 +122,53 @@ Query on next session start:
 curl "http://127.0.0.1:9876/atheneum/context?project=my-project&limit=6"
 ```
 
+### Cross-Project Code Search
+
+When you work on multiple codebases, you often need to find where a symbol is defined or how a pattern is used across projects. Envoy's cross-project endpoints search all magellan-indexed projects registered in atheneum's `meta.db` — without copying data.
+
+**Prerequisites:**
+
+1. Index each project with magellan (one-time):
+   ```bash
+   cd ~/Projects/envoy
+   magellan watch --root ./src --db ~/.magellan/envoy/envoy.db --scan-initial
+   ```
+
+2. Register each project in atheneum (one-time):
+   ```bash
+   atheneum meta-register envoy ~/Projects/envoy \
+     ~/.magellan/envoy/envoy.db --language rust
+   ```
+
+**Search for a symbol across all Rust projects:**
+
+```bash
+curl "http://127.0.0.1:9876/atheneum/cross/search?q=build_router&language=rust&k=10"
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {"project": "envoy", "name": "build_router", "kind": "Function",
+     "file": "src/server.rs", "line": 42, "score": 1.0},
+    {"project": "magellan", "name": "build_router", "kind": "Function",
+     "file": "src/http/mod.rs", "line": 88, "score": 1.0}
+  ]
+}
+```
+
+**Navigate deeper — search + graph walk per project:**
+
+```bash
+curl "http://127.0.0.1:9876/atheneum/cross/navigate?q=build_router&language=rust&k=3&depth=2"
+```
+
+This returns one subgraph per entry-point match, showing callers, callees, and related symbols from each project's magellan DB.
+
+**How it works:** Envoy delegates to atheneum's `CrossRouter`, which lazily `ATTACH DATABASE` each project's magellan DB (read-only) and queries across all attached schemas. An LRU cache (default capacity 8) keeps hot DBs attached across requests. Missing or unreadable DBs are skipped with a warning.
+
 ## API Overview
 
 ### Agent Coordination
@@ -135,6 +184,7 @@ curl "http://127.0.0.1:9876/atheneum/context?project=my-project&limit=6"
 | `GET` | `/messages` | Poll messages |
 | `GET` | `/ws/{agent_id}` | WebSocket push |
 | `GET` | `/health` | Health + uptime |
+| `GET` | `/metrics` | Prometheus metrics (no auth required) |
 
 ### Session Accountability (`--features atheneum`)
 
@@ -200,7 +250,7 @@ Wire in `~/.claude/settings.json`:
 
 ## Requirements
 
-- Rust 1.75+
+- Rust 1.87+
 - SQLite (bundled via rusqlite)
 
 ## Related

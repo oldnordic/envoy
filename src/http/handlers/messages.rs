@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::circuit;
 use crate::error::{EnvoyError, Result};
-use crate::http::state::{recover_lock, SharedState};
+use crate::http::state::SharedState;
 use crate::http::types::*;
 pub(crate) async fn pending_messages(
     State(state): State<SharedState>,
@@ -13,7 +13,7 @@ pub(crate) async fn pending_messages(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let messages = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .message_store
             .poll(engine.graph(), &agent_id, 0, 100, true)
@@ -93,7 +93,7 @@ pub(crate) async fn send_message(
 
     let state_fb = state.clone();
     let stored = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         let stored = state_fb.message_store.store(
             engine.graph(),
             req.msg_type.clone(),
@@ -147,7 +147,7 @@ pub(crate) async fn send_message(
                 let state_fb = state.clone();
                 let recipient_fb = recipient.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    let engine = recover_lock(&state_fb.engine);
+                    let engine = state_fb.engine.lock();
                     state_fb
                         .audit_store
                         .log_circuit_closed(engine.graph(), &recipient_fb)
@@ -161,7 +161,7 @@ pub(crate) async fn send_message(
                     let recipient_fb = recipient.clone();
                     let failures = status.failures;
                     let _ = tokio::task::spawn_blocking(move || {
-                        let engine = recover_lock(&state_fb.engine);
+                        let engine = state_fb.engine.lock();
                         state_fb.audit_store.log_circuit_opened(
                             engine.graph(),
                             &recipient_fb,
@@ -186,7 +186,7 @@ pub(crate) async fn get_message(
 ) -> Result<impl IntoResponse> {
     let state_fb = state.clone();
     let msg = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb.message_store.get(engine.graph(), &message_id)
     })
     .await
@@ -208,7 +208,7 @@ pub(crate) async fn poll_messages(
     let state_fb = state.clone();
     let to = query.to.clone();
     let messages = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .message_store
             .poll(engine.graph(), &to, since, limit, include_acked)
@@ -239,7 +239,7 @@ pub(crate) async fn ack_message(
     let state_fb = state.clone();
     let mid = message_id.clone();
     let acked = tokio::task::spawn_blocking(move || {
-        let engine = recover_lock(&state_fb.engine);
+        let engine = state_fb.engine.lock();
         state_fb
             .message_store
             .ack(engine.graph(), &mid, &req.agent_id)
