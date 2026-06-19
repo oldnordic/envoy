@@ -117,7 +117,20 @@ fn parse_flags(args: &[String]) -> Flags<'_> {
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    // Use args_os() rather than args(): identical for UTF-8 input, but it does
+    // not panic on non-UTF-8 argv (lossy conversion instead), which is the
+    // robust choice for a daemon entry point.
+    //
+    // nosemgrep is required because the p/rust registry ships blanket rules
+    // (`args.args`, `args-os.args-os`) that flag *any* read of process argv,
+    // on the theory that args[0] may be spoofed and must not be a trust
+    // anchor. That does not apply here: we use argv purely for CLI dispatch
+    // (subcommand + flags) and never treat args[0] as a path, identity, or
+    // security boundary.
+    // nosemgrep: rust.lang.security.args-os.args-os
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
 
     // No subcommand at all → usage, bind nothing. (Previously every
     // invocation — even `--help` — bound the TCP port.)

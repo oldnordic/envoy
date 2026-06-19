@@ -117,8 +117,10 @@ async function setup() {
     process.exit(1);
   }
 
-  // Start envoy server on test port
-  serverProcess = spawn(ENVOY_BIN, [], {
+  // Start envoy server on test port. Use the explicit `serve` subcommand:
+  // 0.3.0 subcommand dispatch prints usage (and binds nothing) when invoked
+  // with no args, so the bare form no longer starts a server.
+  serverProcess = spawn(ENVOY_BIN, ["serve"], {
     env: { ...process.env, ENVOY_PORT: String(PORT), ENVOY_DB: path.join(tmpDir, "test.db") },
     stdio: ["pipe", "pipe", "pipe"],
   });
