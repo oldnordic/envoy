@@ -1,6 +1,6 @@
 [package]
 name = "agent-envoy"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Message/coordination server for AI coding agents using sqlitegraph pub/sub"
 license = "GPL-3.0-only"
@@ -32,7 +32,7 @@ parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
-atheneum = { path = "../atheneum/crates/atheneum", version = "0.5.0", optional = true }
+atheneum = { path = "../atheneum/crates/atheneum", version = "0.7", optional = true }
 ureq = { version = "2", default-features = false, features = ["json"] }
 
 [dev-dependencies]

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::engine::Engine;
@@ -6,18 +7,29 @@ use crate::error::Result;
 use crate::http::{build_router, run_nudge_loop, AppState};
 use crate::monitor::{ci, doc};
 
-/// Run the envoy server. Opens (or creates) the database at `db_path`
-/// and starts the HTTP server on `addr`.
-pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
-    run_with_atheneum(db_path, addr, None).await
+/// The default local-RPC socket path: `$XDG_RUNTIME_DIR/envoy.sock`
+/// (typically `/run/user/<uid>/envoy.sock`), falling back to
+/// `/tmp/envoy-<uid>.sock` when no runtime dir is available.
+pub fn default_socket_path() -> std::path::PathBuf {
+    if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
+        return std::path::PathBuf::from(rt).join("envoy.sock");
+    }
+    let uid = std::process::id();
+    std::path::PathBuf::from(format!("/tmp/envoy-{uid}.sock"))
 }
 
-/// Run the envoy server with atheneum integration enabled.
-pub async fn run_with_atheneum(
+/// Open the engine, build shared state, and spawn all background tasks
+/// (nudge loop, hourly purge, optional CI/doc monitors). Returns the state
+/// ready to be served over any transport. This is the single shared daemon
+/// core — both `run_with_atheneum` (HTTP) and `run_local` (Unix socket) use
+/// it so they run identical business logic.
+fn setup_state(
     db_path: &str,
-    addr: SocketAddr,
     #[allow(unused_variables)] atheneum_path: Option<String>,
-) -> Result<()> {
+) -> Result<Arc<AppState>> {
+    // Initialize Prometheus metrics recorder (idempotent via LazyLock).
+    crate::metrics::init();
+
     let engine = Engine::open(db_path)?;
     #[cfg(feature = "atheneum")]
     let state = Arc::new(AppState::new(engine)?.with_atheneum(atheneum_path));
@@ -101,16 +113,91 @@ pub async fn run_with_atheneum(
         }
     }
 
+    Ok(state)
+}
+
+/// Run the envoy HTTP server. Opens (or creates) the database at `db_path`
+/// and starts serving HTTP on `addr`. This is the network + universal curl
+/// transport — opt-in via `envoy serve`.
+pub async fn run(db_path: &str, addr: SocketAddr) -> Result<()> {
+    run_with_atheneum(db_path, addr, None).await
+}
+
+/// Run the envoy HTTP server with atheneum integration enabled.
+pub async fn run_with_atheneum(
+    db_path: &str,
+    addr: SocketAddr,
+    atheneum_path: Option<String>,
+) -> Result<()> {
+    let state = setup_state(db_path, atheneum_path)?;
     let app = build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| crate::error::EnvoyError::WsError(format!("failed to bind {addr}: {e}")))?;
 
-    println!("envoy server listening on {addr}, db={db_path}");
+    println!("envoy serving HTTP on {addr}, db={db_path}");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| crate::error::EnvoyError::WsError(format!("server error: {e}")))?;
+
+    Ok(())
+}
+
+/// Run the envoy local-RPC server over a Unix domain socket. Opens (or
+/// creates) the database at `db_path` and serves the identical router over
+/// `socket_path` — same business logic as HTTP, no TCP port. This is the
+/// local-dev primary transport, opt-in via `envoy local`.
+///
+/// A stale socket file from a previous (crashed) run is removed before
+/// binding. The socket is created with mode 0600 (owner-only). On graceful
+/// shutdown the socket file is cleaned up.
+pub async fn run_local(
+    db_path: &str,
+    socket_path: impl AsRef<Path>,
+    atheneum_path: Option<String>,
+) -> Result<()> {
+    let socket_path = socket_path.as_ref();
+    let state = setup_state(db_path, atheneum_path)?;
+    let app = build_router(state).into_make_service();
+
+    // Remove a stale socket from a previous crashed run.
+    let _ = std::fs::remove_file(socket_path);
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::error::EnvoyError::WsError(format!(
+                "failed to create socket dir {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let listener = tokio::net::UnixListener::bind(socket_path).map_err(|e| {
+        crate::error::EnvoyError::WsError(format!(
+            "failed to bind socket {}: {e}",
+            socket_path.display()
+        ))
+    })?;
+
+    // Restrict to owner-only (0600).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    println!(
+        "envoy serving local RPC on {}, db={db_path}",
+        socket_path.display()
+    );
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+
+    // Always clean up the socket file on exit.
+    let _ = std::fs::remove_file(socket_path);
+
+    result.map_err(|e| crate::error::EnvoyError::WsError(format!("server error: {e}")))?;
 
     Ok(())
 }

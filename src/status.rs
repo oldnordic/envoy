@@ -26,7 +26,14 @@ impl AgentState {
 }
 
 /// A point-in-time snapshot of an agent's status.
+///
+/// Every field is optional on the wire via `#[serde(default)]` at the container
+/// level: callers may send a partial snapshot (e.g. only `{"state":"blocked"}`)
+/// and the omitted fields fall back to [`AgentStatusSnapshot::default`]. This
+/// makes the heartbeat endpoint usable for both a lightweight "I'm alive" ping
+/// (send nothing) and a full status update.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AgentStatusSnapshot {
     pub state: AgentState,
     pub task_id: Option<String>,
@@ -55,6 +62,11 @@ impl Default for AgentStatusSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatRequest {
     pub agent_id: String,
+    /// Optional status snapshot. When omitted (lightweight heartbeat), defaults
+    /// to [`AgentStatusSnapshot::default`] — consistent with the WebSocket
+    /// heartbeat handler. When present, individual fields are themselves
+    /// optional (partial updates).
+    #[serde(default)]
     pub status: AgentStatusSnapshot,
 }
 

@@ -39,6 +39,15 @@ fn build_base_routes() -> Router<SharedState> {
             "/dependencies/dependent/{agent_id}",
             get(get_dependent_deps),
         )
+        // Unambiguous aliases — `/blocking/{id}` = "what is {id} blocking?"
+        // (id is the blocker), `/blocked-by/{id}` = "what is {id} blocked by?"
+        // (id is the dependent). The original routes above remain for backward
+        // compatibility.
+        .route("/dependencies/blocking/{agent_id}", get(get_blocker_deps))
+        .route(
+            "/dependencies/blocked-by/{agent_id}",
+            get(get_dependent_deps),
+        )
         .route(
             "/dependencies/{dep_id}/resolve",
             axum::routing::post(resolve_dependency),

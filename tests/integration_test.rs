@@ -708,11 +708,12 @@ async fn full_handoff_workflow() {
 }
 
 #[tokio::test]
-async fn heartbeat_rejects_missing_working_on() {
+async fn heartbeat_accepts_partial_status() {
     let app = test_app();
 
     // Register an agent first
-    app.clone()
+    let resp = app
+        .clone()
         .oneshot(
             axum::http::Request::builder()
                 .method("POST")
@@ -723,17 +724,22 @@ async fn heartbeat_rejects_missing_working_on() {
         )
         .await
         .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let agent_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+    let agent_id = agent_id["agent_id"].as_str().unwrap();
 
-    // Send heartbeat without working_on field
+    // Send heartbeat with only `state` — missing fields should default
     let response = app
         .oneshot(
             axum::http::Request::builder()
                 .method("POST")
                 .uri("/heartbeat")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"agent_id":"id1","status":{"state":"working"}}"#,
-                ))
+                .body(Body::from(format!(
+                    r#"{{"agent_id":"{agent_id}","status":{{"state":"working"}}}}"#
+                )))
                 .unwrap(),
         )
         .await
@@ -741,9 +747,58 @@ async fn heartbeat_rejects_missing_working_on() {
 
     assert_eq!(
         response.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "heartbeat must reject missing working_on field"
+        StatusCode::OK,
+        "heartbeat with partial status must succeed — missing fields use defaults"
     );
+}
+
+#[tokio::test]
+async fn heartbeat_accepts_lightweight_no_status() {
+    let app = test_app();
+
+    // Register an agent
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"light-agent","kind":"worker"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let agent_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+    let agent_id = agent_id["agent_id"].as_str().unwrap();
+
+    // Lightweight heartbeat — agent_id only, no status object at all
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/heartbeat")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"agent_id":"{agent_id}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "lightweight heartbeat (no status) must succeed with default snapshot"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["accepted"], true, "heartbeat must be accepted");
 }
 
 #[tokio::test]
@@ -1493,4 +1548,102 @@ async fn task_audit_trail_is_tagged() {
     let events = audit_body["events"].as_array().unwrap();
     assert!(!events.is_empty(), "task should have audit trail");
     assert_eq!(events[0]["source"], "task_claimed");
+}
+
+/// Dependency routes expose two pairs: the original (`/blocker/`, `/dependent/`)
+/// and unambiguous aliases (`/blocking/`, `/blocked-by/`). This test verifies
+/// both pairs return the same data and that the direction semantics are
+/// correct: `id1` depends on `id2`, so `id1` is the dependent and `id2` is the
+/// blocker.
+#[tokio::test]
+async fn dependency_route_aliases_match_originals() {
+    let app = test_app();
+
+    // Register two agents
+    for name in ["dep-dependent", "dep-blocker"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"name":"{name}","kind":"worker"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // id1 depends on id2
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/dependencies")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"dependent_agent":"id1","blocker_agent":"id2","reason":"waiting on id2"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Helper: GET a dep route, return the array length
+    async fn dep_count(app: axum::Router, uri: &str) -> usize {
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "GET {uri}");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["dependencies"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0)
+    }
+
+    // id2 is the blocker → both blocker-view routes should find it
+    let via_blocker = dep_count(app.clone(), "/dependencies/blocker/id2").await;
+    let via_blocking = dep_count(app.clone(), "/dependencies/blocking/id2").await;
+    assert_eq!(via_blocker, 1, "blocker route must find the dep");
+    assert_eq!(
+        via_blocking, 1,
+        "blocking alias must return the same as blocker route"
+    );
+
+    // id1 is the dependent → both dependent-view routes should find it
+    let via_dependent = dep_count(app.clone(), "/dependencies/dependent/id1").await;
+    let via_blocked_by = dep_count(app.clone(), "/dependencies/blocked-by/id1").await;
+    assert_eq!(via_dependent, 1, "dependent route must find the dep");
+    assert_eq!(
+        via_blocked_by, 1,
+        "blocked-by alias must return the same as dependent route"
+    );
+
+    // Cross-direction must be empty: id1 is NOT a blocker, id2 is NOT a dependent
+    assert_eq!(
+        dep_count(app.clone(), "/dependencies/blocker/id1").await,
+        0,
+        "id1 is not a blocker"
+    );
+    assert_eq!(
+        dep_count(app.clone(), "/dependencies/dependent/id2").await,
+        0,
+        "id2 is not a dependent"
+    );
 }

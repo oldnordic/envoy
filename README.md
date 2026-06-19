@@ -38,15 +38,22 @@ curl -fsSL https://raw.githubusercontent.com/oldnordic/grounded-coding/master/in
 ## Quick Start
 
 ```bash
-# Start server (default: 127.0.0.1:9876)
+# Start server over HTTP (default: 127.0.0.1:9876) — network access / curl
 envoy serve --port 9876
 
-# Custom database path
-ATHENEUM_DB=~/.local/share/atheneum/atheneum.db envoy serve
+# Or start as a local daemon over a Unix socket (no TCP port) — local dev
+envoy local
+curl --unix-socket /run/user/$UID/envoy.sock http://localhost/health
 
-# Health check
+# Health check (HTTP)
 curl http://127.0.0.1:9876/health
+
+# Introspect what's running (binds nothing)
+envoy status
 ```
+
+Both transports run the same API. Use `serve` for network access or curl-only
+clients; use `local` for same-machine multi-client use with no port to manage.
 
 As a systemd user service (Linux):
 
@@ -238,8 +245,9 @@ Wire in `~/.claude/settings.json`:
 |---------|---------|---------|
 | `ENVOY_DB` | `~/.local/share/envoy/agents.db` | Agent registry SQLite path |
 | `ATHENEUM_DB` | `~/.local/share/atheneum/atheneum.db` | Knowledge graph SQLite path |
-| `ENVOY_PORT` | `9876` | HTTP listen port |
+| `ENVOY_PORT` | `9876` | TCP port for `envoy serve` (HTTP transport) |
 | `ENVOY_URL` | `http://127.0.0.1:9876` | Used by `envoy-hook` and MCP server |
+| `XDG_RUNTIME_DIR` | `/run/user/$UID` | Directory for the `envoy local` Unix socket |
 
 ## Features
 

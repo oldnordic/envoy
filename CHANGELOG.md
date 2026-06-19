@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-19
+
+### Added
+
+- **Subcommand dispatch and two first-class transports** (`main.rs`, `server.rs`): envoy no longer binds a TCP port on every invocation. It now has explicit subcommands, so starting a server is one mode among several rather than the only thing it does:
+  - `envoy local` — run as a local daemon over a **Unix domain socket** (no TCP port). This is the primary local-dev transport: one daemon, shared state, many clients, no port allocation, no firewall. Default socket path is `$XDG_RUNTIME_DIR/envoy.sock` (i.e. `/run/user/$UID/envoy.sock`). It serves the *identical* router as HTTP, via axum's native `UnixListener` support — transport is ingress only, all business logic is shared.
+  - `envoy serve` — run the HTTP server on a TCP port (`--port`, default `$ENVOY_PORT` or 9876). This is the network access + universal curl transport, now explicit opt-in.
+  - `envoy status` — introspection: reports daemon liveness and config. Binds nothing, starts no server.
+- **Unix domain socket transport** (`server.rs::run_local`): serves the full HTTP API over a Unix socket with 0600 permissions; stale sockets are unlinked on startup and on graceful (SIGINT/SIGTERM) shutdown. Contactable by any local client via `curl --unix-socket`, `nc -U`, or a native Rust/Python Unix-socket client.
+
+### Changed
+
+- **Bare-flag invocation is backward-compatible.** `envoy --port 9876` (the old default-everything form) is treated as `envoy serve --port 9876`. Running `envoy` with no arguments now prints usage instead of binding the port.
+- **Bumped `atheneum` dependency** `^0.5.0` → `^0.7` (stale version constraint that no longer resolved against the local atheneum 0.7.x).
+
+### Fixed
+
+- **No more unconditional port bind.** Previously *any* envoy invocation — including `--help` and `status` checks — started the HTTP listener on `:9876`. With subcommand dispatch the port only binds when you explicitly ask for `serve`.
+- **`envoy <subcommand> --help` no longer hangs.** The custom arg parser only intercepted `--help`/`--version` when they appeared as the first argument (`args[1]`). After a subcommand (`envoy local --help`, `envoy serve --version`), the flag was silently swallowed by `parse_flags` and the daemon bound its socket/port forever. The parser now scans all post-subcommand args for `-h`/`--help`/`-V`/`--version` and prints-and-exits before any server starts (`main.rs`).
+- **Heartbeat accepts lightweight and partial status.** `POST /heartbeat` required a fully-populated `status` object — sending `{"agent_id":"id1"}` (a lightweight "I'm alive" ping) or a partial snapshot (only `state`) was rejected with HTTP 422. `HeartbeatRequest.status` and `AgentStatusSnapshot` are now `#[serde(default)]`, so a missing status defaults to the snapshot (consistent with the WebSocket heartbeat handler) and omitted fields fall back to their defaults (`status.rs`). This makes the HTTP heartbeat endpoint usable for both a trivial keep-alive and a full status update.
+- **Unambiguous dependency route aliases.** `/dependencies/blocker/{id}` returns deps where `{id}` *is the blocker*, and `/dependencies/dependent/{id}` returns deps where `{id}` *is the dependent* — correct but easy to query the wrong direction from the names alone. Added two unambiguous aliases: `/dependencies/blocking/{id}` ("what is `{id}` blocking?") and `/dependencies/blocked-by/{id}` ("what is `{id}` blocked by?"). Both pairs return identical results; the originals are kept for backward compatibility (`router.rs`). `MANUAL.md` gained a Dependencies section documenting create/query/resolve with the direction semantics spelled out.
+
 ## [0.2.0] - 2026-06-12
 
 ### Added
