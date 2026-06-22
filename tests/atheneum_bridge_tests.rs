@@ -353,6 +353,213 @@ async fn test_claim_handoff() {
     assert!(pending_json["handoff"].is_null());
 }
 
+#[tokio::test]
+async fn test_get_session_inspect_returns_events_and_tool_calls() {
+    let (app, _temp_dir) = setup_test_router();
+
+    let session_request = json!({
+        "session_id": "sess-1",
+        "agent": "hermes",
+        "project": "envoy",
+        "tool": "hermes",
+        "trigger": "cli",
+        "model": "openai/gpt-test"
+    });
+
+    let _ = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/atheneum/sessions")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&session_request).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let tool_call_request = json!({
+        "session_id": "sess-1",
+        "tool_name": "magellan",
+        "input_summary": "status",
+        "output_summary": "ok",
+        "exit_status": "ok",
+        "latency_ms": 10,
+        "tool_category": "grounded"
+    });
+
+    let _ = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/atheneum/tool-calls")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&tool_call_request).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::GET)
+                .uri("/atheneum/sessions/sess-1?limit=10")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(response_json["session"]["session_id"], "sess-1");
+    assert_eq!(response_json["event_count"], 2);
+    assert_eq!(response_json["tool_call_count"], 1);
+    assert_eq!(
+        response_json["tool_calls"][0]["payload"]["tool_name"],
+        "magellan"
+    );
+}
+
+#[tokio::test]
+async fn test_get_recent_tool_calls_filters_by_session() {
+    let (app, _temp_dir) = setup_test_router();
+
+    for session_id in ["sess-a", "sess-b"] {
+        let session_request = json!({
+            "session_id": session_id,
+            "agent": "hermes",
+            "project": "envoy",
+            "tool": "hermes",
+            "trigger": "cli"
+        });
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/atheneum/sessions")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_string(&session_request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    for (session_id, tool_name) in [("sess-a", "magellan"), ("sess-b", "mirage")] {
+        let tool_call_request = json!({
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "input_summary": "summary",
+            "output_summary": "ok",
+            "exit_status": "ok",
+            "latency_ms": 5,
+            "tool_category": "grounded"
+        });
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/atheneum/tool-calls")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_string(&tool_call_request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::GET)
+                .uri("/atheneum/tool-calls/recent?session_id=sess-b&limit=10")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(response_json["count"], 1);
+    assert_eq!(response_json["events"][0]["session_id"], "sess-b");
+    assert_eq!(response_json["usage"][0]["tool_name"], "mirage");
+    assert_eq!(response_json["usage"][0]["count"], 1);
+}
+
+#[tokio::test]
+async fn test_get_recent_handoffs_filters_by_agent() {
+    let (app, _temp_dir) = setup_test_router();
+
+    for (from_agent, to_agent) in [("claude1", "claude2"), ("claude3", "claude4")] {
+        let handoff_request = json!({
+            "from_agent": from_agent,
+            "to_agent": to_agent,
+            "manifest": {"task": "test"}
+        });
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/atheneum/handoffs")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_string(&handoff_request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::GET)
+                .uri("/atheneum/handoffs/recent?agent=claude4&limit=10")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(response_json["count"], 1);
+    assert_eq!(response_json["handoffs"][0]["from_agent"], "claude3");
+    assert_eq!(response_json["handoffs"][0]["to_agent"], "claude4");
+}
+
 // ============================================================================
 // Knowledge Query Endpoint Tests
 // ============================================================================

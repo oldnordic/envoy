@@ -307,6 +307,125 @@ Retrieves recent sessions, optionally filtered by project or parent session.
 
 ---
 
+### 7a. Get Session Details
+
+Retrieves details of a specific session by ID, including its associated events and tool calls.
+
+**Endpoint:** `GET /atheneum/sessions/{id}`
+
+**Path Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `id` | string | The session ID |
+
+**Query Parameters:**
+| Parameter | Required | Type | Default | Description |
+|-----------|----------|------|---------|-------------|
+| `limit` | No | integer | `20` | Max events and tool calls to return |
+
+**Response (200 OK):**
+```json
+{
+  "session": {
+    "session_id": "sess-1",
+    "project": "envoy",
+    "git_branch": "main",
+    "trigger": "cli",
+    "started_at": "2026-06-22T00:58:34Z",
+    "ended_at": null,
+    "exit_status": "running",
+    "tool_call_count": 0,
+    "file_write_count": 0,
+    "commit_count": 0,
+    "parent_session_id": null,
+    "last_tool": null,
+    "last_tool_summary": null,
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "total_cost_usd": 0.0
+  },
+  "event_count": 1,
+  "tool_call_count": 0,
+  "tool_calls": [],
+  "events": [
+    {
+      "event_id": 1,
+      "event_type": "session_start",
+      "entity_id": "sess-1",
+      "session_id": "sess-1",
+      "payload": {
+        "project": "envoy",
+        "tool": "hermes"
+      },
+      "timestamp": "2026-06-22T00:58:34Z"
+    }
+  ]
+}
+```
+
+**Errors:**
+- `404` — Session not found
+- `500` — Database error
+
+---
+
+### 7b. Query Recent Tool Calls
+
+Query recent tool call events and get aggregated counts per tool.
+
+**Endpoint:** `GET /atheneum/tool-calls/recent`
+
+**Query Parameters:**
+| Parameter | Required | Type | Default | Description |
+|-----------|----------|------|---------|-------------|
+| `session_id` | No | string | — | Filter by a specific session ID |
+| `limit` | No | integer | `50` | Max tool calls to return |
+
+**Response (200 OK):**
+```json
+{
+  "count": 1,
+  "usage": [
+    {
+      "tool_name": "magellan",
+      "count": 1
+    }
+  ],
+  "events": []
+}
+```
+
+**Errors:**
+- `500` — Database error
+
+---
+
+### 7c. Query Recent Handoffs
+
+Query recent handoff events.
+
+**Endpoint:** `GET /atheneum/handoffs/recent`
+
+**Query Parameters:**
+| Parameter | Required | Type | Default | Description |
+|-----------|----------|------|---------|-------------|
+| `project` | No | string | — | Filter handoffs by project name |
+| `agent` | No | string | — | Filter handoffs by agent name |
+| `limit` | No | integer | `10` | Max handoffs to return |
+
+**Response (200 OK):**
+```json
+{
+  "count": 1,
+  "handoffs": []
+}
+```
+
+**Errors:**
+- `500` — Database error
+
+---
+
 ### 8. Record Event
 
 Stores a generic event in the atheneum event log for cross-session auditing.

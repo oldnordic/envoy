@@ -111,6 +111,14 @@ curl "http://127.0.0.1:9876/atheneum/sessions?project=my-project&last=3"
 
 Returns compact session history: branch, tool call count, file writes, last action.
 
+Inspect a specific session or recent handoff/tool activity:
+
+```bash
+curl "http://127.0.0.1:9876/atheneum/sessions/sess-1?limit=10"
+curl "http://127.0.0.1:9876/atheneum/tool-calls/recent?session_id=sess-1&limit=10"
+curl "http://127.0.0.1:9876/atheneum/handoffs/recent?project=my-project&agent=claude4&limit=10"
+```
+
 ### Knowledge Persistence
 
 Store discoveries so future agents don't re-discover:
@@ -200,13 +208,16 @@ This returns one subgraph per entry-point match, showing callers, callees, and r
 | `POST` | `/atheneum/sessions` | Record session start |
 | `PATCH` | `/atheneum/sessions/{id}` | Record session end |
 | `GET` | `/atheneum/sessions` | Query recent sessions (`?project=X&last=N`) |
+| `GET` | `/atheneum/sessions/{id}` | Inspect session summary, tool calls, and events |
 | `POST` | `/atheneum/sessions/{id}/handover` | Write subagent handover note |
 | `POST` | `/atheneum/tool-calls` | Record tool call |
+| `GET` | `/atheneum/tool-calls/recent` | Query recent tool calls (`?session_id=X&limit=N`) |
 | `GET` | `/atheneum/events` | Query event log |
 | `GET` | `/atheneum/context` | Recent project discoveries (`?project=X&limit=N`) |
 | `POST` | `/atheneum/discoveries` | Store discovery |
 | `GET` | `/atheneum/knowledge` | Query knowledge by target |
 | `GET` | `/atheneum/search` | Lexical search (hash-projected HNSW) |
+| `GET` | `/atheneum/handoffs/recent` | Query recent handoffs (`?project=X&agent=Y&limit=N`) |
 | `GET` | `/atheneum/cross/search` | Cross-project symbol search (`?q=&language=&k=`) |
 | `GET` | `/atheneum/cross/navigate` | Cross-project search + subgraph walk (`?q=&language=&k=&depth=`) |
 | `POST` | `/atheneum/tasks` | Create task |

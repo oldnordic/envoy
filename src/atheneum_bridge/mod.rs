@@ -43,6 +43,10 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
             axum::routing::post(discovery::post_handoff),
         )
         .route(
+            "/atheneum/handoffs/recent",
+            axum::routing::get(discovery::get_recent_handoffs),
+        )
+        .route(
             "/atheneum/handoffs/pending",
             axum::routing::get(discovery::get_pending_handoff),
         )
@@ -121,7 +125,7 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
         )
         .route(
             "/atheneum/sessions/{id}",
-            axum::routing::patch(sessions::patch_session),
+            axum::routing::patch(sessions::patch_session).get(sessions::get_session_inspect),
         )
         .route(
             "/atheneum/sessions/{id}/handover",
@@ -134,6 +138,10 @@ pub fn add_atheneum_routes(router: Router<Arc<AppState>>) -> Router<Arc<AppState
         .route(
             "/atheneum/tool-calls",
             axum::routing::post(sessions::post_tool_call),
+        )
+        .route(
+            "/atheneum/tool-calls/recent",
+            axum::routing::get(sessions::get_recent_tool_calls),
         )
         .route(
             "/atheneum/file-writes",

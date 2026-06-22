@@ -50,7 +50,19 @@ fn project_dir() -> String {
 }
 
 fn project_name(dir: &str) -> String {
-    std::path::Path::new(dir)
+    // Prefer the git toplevel basename so worktrees, subdirectories, and
+    // launches from a subdir all map to the repository name — not the cwd's
+    // immediate parent (which produced `tmp` and subdir tags historically).
+    // Falls back to the dir basename when not inside a git worktree.
+    let toplevel = std::process::Command::new("git")
+        .args(["-C", dir, "rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let base = toplevel.as_deref().unwrap_or(dir);
+    std::path::Path::new(base)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unknown".to_string())
@@ -1096,5 +1108,46 @@ mod tests {
         assert_eq!(body["test_suite"], "cargo");
         assert_eq!(body["result"], "passed");
         assert_eq!(body["test_command"], "cargo test -p forge-agent --lib");
+    }
+
+    /// `project_name` resolves the git toplevel basename so a subdir or
+    /// worktree maps to the repo name, not the cwd's parent. Falls back to
+    /// the dir basename outside a git worktree.
+    #[test]
+    fn project_name_uses_git_toplevel_basename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // Initialize a real git repo so `git rev-parse --show-toplevel` resolves.
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+        let repo_name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // Subdir two levels deep — must still resolve to the repo basename.
+        let subdir = root.join("nested/sub");
+        std::fs::create_dir_all(&subdir).expect("mkdir");
+        assert_eq!(
+            project_name(subdir.to_str().unwrap()),
+            repo_name,
+            "subdir should resolve to git toplevel basename"
+        );
+
+        // Non-git temp dir falls back to its own basename.
+        let nongit = tempfile::tempdir().expect("tempdir2");
+        let nongit_name = nongit
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert_eq!(
+            project_name(nongit.path().to_str().unwrap()),
+            nongit_name,
+            "non-git dir should fall back to dir basename"
+        );
     }
 }

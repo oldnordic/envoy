@@ -281,6 +281,105 @@ pub async fn get_events(
     Ok(Json(QueryEventsResponse { events }))
 }
 
+/// GET /atheneum/sessions/{id} — inspect session details and events
+pub async fn get_session_inspect(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Query(query): Query<SessionInspectQuery>,
+) -> Result<Json<SessionInspectResponse>> {
+    let session_id_clone = session_id.clone();
+    let limit = query.limit as usize;
+
+    let session = state
+        .with_atheneum_async(move |g| {
+            g.query_session_by_id(&session_id_clone)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+
+    if session.is_none() {
+        return Ok(Json(SessionInspectResponse {
+            session: None,
+            event_count: 0,
+            tool_call_count: 0,
+            tool_calls: vec![],
+            events: vec![],
+        }));
+    }
+
+    let session_id_clone2 = session_id.clone();
+    let events = state
+        .with_atheneum_async(move |g| {
+            g.query_events(Some(&session_id_clone2), None, limit)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+
+    let session_id_clone3 = session_id.clone();
+    let tool_calls = state
+        .with_atheneum_async(move |g| {
+            g.query_events(Some(&session_id_clone3), Some("tool_call"), limit)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+
+    let event_count = events.len();
+    let tool_call_count = tool_calls.len();
+
+    Ok(Json(SessionInspectResponse {
+        session,
+        event_count,
+        tool_call_count,
+        tool_calls,
+        events,
+    }))
+}
+
+/// GET /atheneum/tool-calls/recent — query recent tool calls and aggregate tool usage count
+pub async fn get_recent_tool_calls(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RecentToolCallsQuery>,
+) -> Result<Json<RecentToolCallsResponse>> {
+    let session_id = query.session_id.clone();
+    let limit = query.limit;
+
+    let events = state
+        .with_atheneum_async(move |g| {
+            g.query_events(session_id.as_deref(), Some("tool_call"), limit)
+                .map_err(crate::error::EnvoyError::from)
+        })
+        .await?;
+
+    use std::collections::HashMap;
+    let mut usage_map: HashMap<String, usize> = HashMap::new();
+    for event in &events {
+        if let Some(payload) = event.get("payload") {
+            if let Some(tool_name) = payload.get("tool_name").and_then(|t| t.as_str()) {
+                *usage_map.entry(tool_name.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut usage: Vec<ToolUsageItem> = usage_map
+        .into_iter()
+        .map(|(tool_name, count)| ToolUsageItem { tool_name, count })
+        .collect();
+
+    usage.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.tool_name.cmp(&b.tool_name))
+    });
+
+    let count = events.len();
+
+    Ok(Json(RecentToolCallsResponse {
+        count,
+        usage,
+        events,
+    }))
+}
+
 /// GET /atheneum/sessions — query recent sessions for a project
 pub async fn get_sessions(
     State(state): State<Arc<AppState>>,

@@ -6,6 +6,31 @@ use crate::atheneum_bridge::types::*;
 use crate::error::Result;
 use crate::http::AppState;
 
+pub(crate) fn graph_entity_to_handoff_data(e: atheneum::GraphEntity) -> HandoffData {
+    let empty = serde_json::Map::new();
+    let data = e.data.as_object().unwrap_or(&empty);
+    HandoffData {
+        id: e.id,
+        name: e.name,
+        from_agent: data
+            .get("from_agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        to_agent: data
+            .get("to_agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        manifest: data.get("manifest").cloned().unwrap_or_default(),
+        created_at: data
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
 pub async fn post_discovery(
     State(state): State<Arc<AppState>>,
     Json(req): Json<StoreDiscoveryRequest>,
@@ -123,34 +148,40 @@ pub async fn get_pending_handoff(
             let entity = atheneum
                 .get_pending_handoff_in_project(&agent, project.as_deref())
                 .map_err(crate::error::EnvoyError::from)?;
-            Ok(entity.map(|e| {
-                let empty = serde_json::Map::new();
-                let data = e.data.as_object().unwrap_or(&empty);
-                HandoffData {
-                    id: e.id,
-                    name: e.name,
-                    from_agent: data
-                        .get("from_agent")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    to_agent: data
-                        .get("to_agent")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    manifest: data.get("manifest").cloned().unwrap_or_default(),
-                    created_at: data
-                        .get("created_at")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                }
-            }))
+            Ok(entity.map(graph_entity_to_handoff_data))
         })
         .await?;
 
     Ok(Json(PendingHandoffResponse { handoff }))
+}
+
+/// GET /atheneum/handoffs/recent?project=P&agent=A&limit=N
+pub async fn get_recent_handoffs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RecentHandoffsQuery>,
+) -> Result<impl axum::response::IntoResponse> {
+    let project = query.project.clone();
+    let agent = query.agent.clone();
+    let limit = query.limit;
+
+    let handoffs = state
+        .with_atheneum_async(move |atheneum| {
+            let entities = atheneum
+                .recent_handoffs(project.as_deref(), agent.as_deref(), limit)
+                .map_err(crate::error::EnvoyError::from)?;
+            Ok::<Vec<HandoffData>, crate::error::EnvoyError>(
+                entities
+                    .into_iter()
+                    .map(graph_entity_to_handoff_data)
+                    .collect(),
+            )
+        })
+        .await?;
+
+    Ok(Json(RecentHandoffsResponse {
+        count: handoffs.len(),
+        handoffs,
+    }))
 }
 
 /// POST /atheneum/handoffs/{id}/claim - Mark handoff as claimed

@@ -175,7 +175,54 @@ All session/evidence endpoints are prefixed with `/atheneum/`.
 
 **Query params:** `project`, `last` (default 5), `parent_id`
 
-### `PATCH /atheneum/sessions/{id}/end` -- End session
+### `GET /atheneum/sessions/{id}` -- Inspect session
+
+Inspects a specific session's summary and its associated events and tool calls.
+
+**Query params:** `limit` (default 20)
+
+**Response:**
+
+```json
+{
+  "session": {
+    "session_id": "sess-1",
+    "project": "envoy",
+    "git_branch": "main",
+    "trigger": "cli",
+    "started_at": "2026-06-22T00:58:34Z",
+    "ended_at": null,
+    "exit_status": "running",
+    "tool_call_count": 0,
+    "file_write_count": 0,
+    "commit_count": 0,
+    "parent_session_id": null,
+    "last_tool": null,
+    "last_tool_summary": null,
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "total_cost_usd": 0.0
+  },
+  "event_count": 1,
+  "tool_call_count": 0,
+  "tool_calls": [],
+  "events": [
+    {
+      "event_id": 1,
+      "event_type": "session_start",
+      "entity_id": "sess-1",
+      "session_id": "sess-1",
+      "payload": {
+        "project": "envoy",
+        "tool": "hermes"
+      },
+      "timestamp": "2026-06-22T00:58:34Z"
+    }
+  ]
+}
+```
+
+### `PATCH /atheneum/sessions/{id}` -- End session
 
 **Request body:**
 
@@ -204,6 +251,58 @@ All session/evidence endpoints are prefixed with `/atheneum/`.
 | `outcome`      | string   | no       | Default: "complete" |
 
 **Response:** `{"recorded": true}`
+
+### `GET /atheneum/tool-calls/recent` -- Query recent tool calls
+
+Returns recent `tool_call` events, optionally scoped to one session, plus an aggregated usage summary.
+
+**Query params:** `session_id`, `limit` (default 20)
+
+**Response:**
+
+```json
+{
+  "count": 2,
+  "usage": [
+    {"tool_name": "magellan", "count": 1},
+    {"tool_name": "mirage", "count": 1}
+  ],
+  "events": [
+    {
+      "event_id": 11,
+      "event_type": "tool_call",
+      "entity_id": "sess-1:tool:11",
+      "session_id": "sess-1",
+      "payload": {"tool_name": "magellan"},
+      "timestamp": "2026-06-22T01:10:00Z"
+    }
+  ]
+}
+```
+
+### `GET /atheneum/handoffs/recent` -- Query recent handoffs
+
+Returns recent handoffs with optional project and agent filtering.
+
+**Query params:** `project`, `agent`, `limit` (default 10)
+
+**Response:**
+
+```json
+{
+  "count": 1,
+  "handoffs": [
+    {
+      "id": 7,
+      "name": "claude3->claude4",
+      "from_agent": "claude3",
+      "to_agent": "claude4",
+      "manifest": {"task": "inspect sessions"},
+      "created_at": "2026-06-22T01:12:00Z"
+    }
+  ]
+}
+```
 
 ---
 
@@ -241,6 +340,27 @@ All evidence endpoints return `{"recorded": true}` on success.
 | `latency_ms`      | u64    | no       |
 | `input_tokens_est`| u64    | no       |
 | `tool_category`   | string | no       |
+
+### `GET /atheneum/tool-calls/recent` -- Query recent tool calls
+
+Query recent tool call events and get aggregated counts per tool.
+
+**Query params:** `session_id` (optional), `limit` (default 50)
+
+**Response:**
+
+```json
+{
+  "count": 1,
+  "usage": [
+    {
+      "tool_name": "magellan",
+      "count": 1
+    }
+  ],
+  "events": [...]
+}
+```
 
 ### `POST /atheneum/file-writes` -- Record a file write
 
@@ -415,6 +535,21 @@ Returns incoming and outgoing edges for an entity.
 ### `POST /atheneum/handoffs` -- Create handoff
 
 ### `GET /atheneum/handoffs/pending` -- Get pending handoff
+
+### `GET /atheneum/handoffs/recent` -- Query recent handoffs
+
+Query recent handoff events.
+
+**Query params:** `project` (optional), `agent` (optional), `limit` (default 10)
+
+**Response:**
+
+```json
+{
+  "count": 1,
+  "handoffs": [...]
+}
+```
 
 ### `POST /atheneum/handoffs/{id}/claim` -- Claim a handoff
 

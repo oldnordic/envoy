@@ -11,12 +11,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
+use envoy::atheneum_bridge::types::{
+    EndSessionRequest, RecentHandoffsQuery, RecentToolCallsQuery, RecentToolCallsResponse,
+    RecordPromptRequest, RecordSessionRequest, RecordSessionResponse, RecordToolCallRequest,
+    SessionInspectQuery, SessionInspectResponse, ToolUsageItem,
+};
 use envoy::engine::Engine;
 
-// Test state with engine and atheneum path
+// Test state with the Atheneum database path.
 #[derive(Clone)]
 pub struct TestState {
-    #[allow(dead_code)]
     pub engine: Arc<std::sync::Mutex<Engine>>,
     pub atheneum_path: String,
 }
@@ -101,6 +105,12 @@ pub struct HandoffData {
     pub to_agent: String,
     pub manifest: serde_json::Value,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecentHandoffsResponse {
+    pub count: usize,
+    pub handoffs: Vec<HandoffData>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1166,13 +1176,267 @@ pub async fn get_search(
     }))
 }
 
+pub async fn post_session(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<RecordSessionRequest>,
+) -> Result<(axum::http::StatusCode, Json<RecordSessionResponse>), envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let session_id = req.session_id.clone();
+    let session_id_for_response = session_id.clone();
+    tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.record_session(atheneum::graph::SessionParams {
+            session_id: req.session_id,
+            agent_name: req.agent,
+            project: req.project,
+            tool: req.tool,
+            trigger: req.trigger,
+            model: req.model,
+            git_branch: req.git_branch,
+            git_head: req.git_head,
+            parent_session_id: req.parent_session_id,
+            relations: vec![],
+        })
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(RecordSessionResponse {
+            session_id: session_id_for_response,
+            recorded: true,
+        }),
+    ))
+}
+
+pub async fn patch_session(
+    State(state): State<Arc<TestState>>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Json(req): Json<EndSessionRequest>,
+) -> Result<axum::http::StatusCode, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.end_session(atheneum::graph::EndSessionParams {
+            session_id,
+            exit_status: req.exit_status,
+            prompt_count: req.prompt_count as i64,
+            tool_call_count: req.tool_call_count as i64,
+            file_write_count: req.file_write_count as i64,
+            commit_count: req.commit_count as i64,
+            test_run_count: req.test_run_count as i64,
+            total_input_tokens: req.total_input_tokens as i64,
+            total_output_tokens: req.total_output_tokens as i64,
+            total_cost_usd: req.total_cost_usd,
+        })
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok(axum::http::StatusCode::OK)
+}
+
+pub async fn post_prompt(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<RecordPromptRequest>,
+) -> Result<Json<serde_json::Value>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.record_evidence_prompt(atheneum::graph::PromptParams {
+            session_id: req.session_id,
+            role: req.role,
+            sequence: req.sequence as i64,
+            content_summary: None,
+            source: None,
+            input_hash: req.input_hash,
+            input_tokens: req.input_tokens.map(|v| v as i64),
+            output_hash: req.output_hash,
+            output_tokens: req.output_tokens.map(|v| v as i64),
+            latency_ms: req.latency_ms.map(|v| v as i64),
+            model: req.model,
+            cost_usd: req.cost_usd,
+            relations: vec![],
+        })
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok(Json(serde_json::json!({"recorded": true})))
+}
+
+pub async fn post_tool_call(
+    State(state): State<Arc<TestState>>,
+    Json(req): Json<RecordToolCallRequest>,
+) -> Result<Json<serde_json::Value>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.record_evidence_tool_call(atheneum::graph::ToolCallParams {
+            session_id: req.session_id,
+            tool_name: req.tool_name,
+            tool_version: req.tool_version,
+            sequence: Some(0),
+            source: None,
+            input_hash: req.input_hash,
+            input_summary: req.input_summary,
+            output_hash: req.output_hash,
+            output_summary: req.output_summary,
+            exit_status: req.exit_status,
+            latency_ms: req.latency_ms as i64,
+            input_tokens_est: req.input_tokens_est.map(|v| v as i64),
+            tool_category: req.tool_category,
+            relations: vec![],
+        })
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok(Json(serde_json::json!({"recorded": true})))
+}
+
+pub async fn get_session_inspect(
+    State(state): State<Arc<TestState>>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Query(query): Query<SessionInspectQuery>,
+) -> Result<Json<SessionInspectResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let limit = query.limit as usize;
+    let session_id_clone = session_id.clone();
+
+    let (session, events, tool_calls) = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        let session = g.query_session_by_id(&session_id_clone)?;
+        let events = g.query_events(Some(&session_id_clone), None, limit)?;
+        let tool_calls = g.query_events(Some(&session_id_clone), Some("tool_call"), limit)?;
+        anyhow::Ok((session, events, tool_calls))
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    let event_count = events.len();
+    let tool_call_count = tool_calls.len();
+
+    Ok(Json(SessionInspectResponse {
+        session,
+        event_count,
+        tool_call_count,
+        tool_calls,
+        events,
+    }))
+}
+
+pub async fn get_recent_tool_calls(
+    State(state): State<Arc<TestState>>,
+    Query(query): Query<RecentToolCallsQuery>,
+) -> Result<Json<RecentToolCallsResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let session_id = query.session_id.clone();
+    let limit = query.limit;
+
+    let events = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        g.query_events(session_id.as_deref(), Some("tool_call"), limit)
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    use std::collections::HashMap;
+    let mut usage_map: HashMap<String, usize> = HashMap::new();
+    for event in &events {
+        if let Some(payload) = event.get("payload") {
+            if let Some(tool_name) = payload.get("tool_name").and_then(|t| t.as_str()) {
+                *usage_map.entry(tool_name.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut usage: Vec<ToolUsageItem> = usage_map
+        .into_iter()
+        .map(|(tool_name, count)| ToolUsageItem { tool_name, count })
+        .collect();
+
+    usage.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.tool_name.cmp(&b.tool_name))
+    });
+
+    let count = events.len();
+
+    Ok(Json(RecentToolCallsResponse {
+        count,
+        usage,
+        events,
+    }))
+}
+
+fn graph_entity_to_handoff_data(h: atheneum::GraphEntity) -> HandoffData {
+    let from_agent = h.data["from_agent"].as_str().unwrap_or("").to_string();
+    let to_agent = h.data["to_agent"].as_str().unwrap_or("").to_string();
+    let manifest = h
+        .data
+        .get("manifest")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    HandoffData {
+        id: h.id,
+        name: h.name,
+        from_agent,
+        to_agent,
+        manifest,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+pub async fn get_recent_handoffs(
+    State(state): State<Arc<TestState>>,
+    Query(query): Query<RecentHandoffsQuery>,
+) -> Result<Json<RecentHandoffsResponse>, envoy::error::EnvoyError> {
+    let atheneum_path = state.atheneum_path.clone();
+    let project = query.project.clone();
+    let agent = query.agent.clone();
+    let limit = query.limit;
+
+    let handoffs = tokio::task::spawn_blocking(move || {
+        use atheneum::graph::AtheneumGraph;
+        let g = AtheneumGraph::open(std::path::Path::new(&atheneum_path))?;
+        let entities = g.recent_handoffs(project.as_deref(), agent.as_deref(), limit)?;
+        Ok::<_, anyhow::Error>(
+            entities
+                .into_iter()
+                .map(graph_entity_to_handoff_data)
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await
+    .map_err(|e| envoy::error::EnvoyError::Atheneum(anyhow::anyhow!("{}", e)))??;
+
+    Ok(Json(RecentHandoffsResponse {
+        count: handoffs.len(),
+        handoffs,
+    }))
+}
+
 pub fn build_test_router(state: Arc<TestState>) -> Router {
+    drop(state.engine.lock().expect("test engine lock"));
     Router::new()
         .route(
             "/atheneum/discoveries",
             post(store_discovery).get(get_discoveries),
         )
         .route("/atheneum/handoffs", post(store_handoff))
+        .route(
+            "/atheneum/handoffs/recent",
+            axum::routing::get(get_recent_handoffs),
+        )
         .route(
             "/atheneum/handoffs/pending",
             axum::routing::get(get_pending_handoff),
@@ -1183,6 +1447,17 @@ pub fn build_test_router(state: Arc<TestState>) -> Router {
         )
         .route("/atheneum/knowledge", axum::routing::get(get_knowledge))
         .route("/atheneum/search", axum::routing::get(get_search))
+        .route("/atheneum/sessions", post(post_session))
+        .route(
+            "/atheneum/sessions/{id}",
+            axum::routing::patch(patch_session).get(get_session_inspect),
+        )
+        .route("/atheneum/prompts", post(post_prompt))
+        .route("/atheneum/tool-calls", post(post_tool_call))
+        .route(
+            "/atheneum/tool-calls/recent",
+            axum::routing::get(get_recent_tool_calls),
+        )
         .route(
             "/atheneum/tasks",
             axum::routing::post(create_task).get(list_tasks),

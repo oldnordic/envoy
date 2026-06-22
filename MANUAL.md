@@ -384,6 +384,27 @@ are pushed in real time.
 The client can send text frames as heartbeats — they're acknowledged but ignored by
 the server. The server never initiates a close unless the agent is offline.
 
+## Session And Knowledge Inspection
+
+When the `atheneum` feature is enabled, Envoy exposes read-only session and knowledge inspection endpoints so operators do not need direct SQLite access for routine tracing:
+
+```bash
+# Recent sessions for a project
+curl "http://127.0.0.1:9876/atheneum/sessions?project=envoy&last=5"
+
+# One session: summary + events + tool calls
+curl "http://127.0.0.1:9876/atheneum/sessions/sess-1?limit=10"
+
+# Recent tool-call evidence for one session
+curl "http://127.0.0.1:9876/atheneum/tool-calls/recent?session_id=sess-1&limit=10"
+
+# Recent handoffs filtered by project or agent
+curl "http://127.0.0.1:9876/atheneum/handoffs/recent?project=envoy&limit=10"
+curl "http://127.0.0.1:9876/atheneum/handoffs/recent?agent=claude4&limit=10"
+```
+
+`GET /atheneum/sessions/{id}` is the fastest way to reconstruct what an agent did in a specific session. `GET /atheneum/tool-calls/recent` gives the event stream plus a per-tool count. `GET /atheneum/handoffs/recent` is the handoff inbox view for operators and subagent supervisors.
+
 ## Dependencies
 
 Agents can declare that they are blocked by another agent. When the blocker

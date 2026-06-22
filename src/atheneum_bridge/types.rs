@@ -75,6 +75,20 @@ pub struct PendingHandoffResponse {
     pub handoff: Option<HandoffData>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RecentHandoffsQuery {
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default = "default_recent_limit")]
+    pub limit: i64,
+}
+
+fn default_recent_limit() -> i64 {
+    10
+}
+
 #[derive(Debug, Serialize)]
 pub struct HandoffData {
     pub id: i64,
@@ -89,6 +103,12 @@ pub struct HandoffData {
 pub struct ClaimHandoffResponse {
     pub claimed: bool,
     pub handoff_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecentHandoffsResponse {
+    pub count: usize,
+    pub handoffs: Vec<HandoffData>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,6 +419,16 @@ pub struct QuerySessionsQuery {
     pub parent_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SessionInspectQuery {
+    #[serde(default = "default_event_limit_i64")]
+    pub limit: i64,
+}
+
+fn default_event_limit_i64() -> i64 {
+    20
+}
+
 fn default_sessions_last() -> i64 {
     5
 }
@@ -548,6 +578,14 @@ pub struct QueryEventsQuery {
     pub limit: usize,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RecentToolCallsQuery {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default = "default_event_limit")]
+    pub limit: usize,
+}
+
 // default_search_k, default_tool, default_trigger, default_event_limit moved to utils.rs
 
 #[derive(Debug, Deserialize)]
@@ -560,6 +598,28 @@ pub struct RecordEventRequest {
 
 #[derive(Debug, Serialize)]
 pub struct QueryEventsResponse {
+    pub events: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionInspectResponse {
+    pub session: Option<atheneum::graph::SessionSummary>,
+    pub event_count: usize,
+    pub tool_call_count: usize,
+    pub tool_calls: Vec<serde_json::Value>,
+    pub events: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolUsageItem {
+    pub tool_name: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecentToolCallsResponse {
+    pub count: usize,
+    pub usage: Vec<ToolUsageItem>,
     pub events: Vec<serde_json::Value>,
 }
 

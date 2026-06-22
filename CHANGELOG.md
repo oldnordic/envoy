@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-22
+
+### Added
+
+- **HTTP read-only observability endpoints** (`GET /atheneum/sessions/{id}`, `GET /atheneum/tool-calls/recent`, `GET /atheneum/handoffs/recent`):
+  - `GET /atheneum/sessions/{id}` returns the session summary along with its associated events and tool calls, allowing direct tracing.
+  - `GET /atheneum/tool-calls/recent` allows querying recent tool calls with optional `session_id` filter and aggregates tool usage counts.
+  - `GET /atheneum/handoffs/recent` retrieves recent handoffs with optional `project` and `agent` filtering.
+- Fully wired the new endpoints to the routing framework and the integration test harness.
+
+### Changed
+
+- **Mandatory Agent Identity Enforcement**: Verified and aligned agent identity parameters (`agent_id`, `agent_name`) across write-path payloads to guarantee provenance.
+- **`project_name` resolves the git toplevel basename** (`src/bin/hook.rs`): `cmd_session_start` / `cmd_tool_call` / `cmd_session_end` / `cmd_subagent_end` now tag sessions with the repository name (via `git rev-parse --show-toplevel`) instead of the cwd's immediate parent. Fixes worktree/subdir launches being tagged `tmp` or with a subdirectory name. Falls back to the dir basename outside a git worktree. Covered by `project_name_uses_git_toplevel_basename`.
+- **`atheneum` dependency bumped to `^0.8`** (`Cargo.toml`): tracks the atheneum 0.8.0 release (session-digest composer, `thread` decision-chain navigation, `semantic-search` now opt-in). The bridge code is unchanged; this is a version-constraint update only.
+
 ## [0.3.0] - 2026-06-19
 
 ### Added
