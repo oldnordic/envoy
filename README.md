@@ -23,6 +23,27 @@ grounded-coding ── install + Claude Code plugin (skills, hooks, MCP)
 
 Each tool is independently useful. Together they give language-model coding agents the infrastructure that vendors don't ship: persistent identity, audit trails, cross-session memory, and multi-agent coordination.
 
+## Technical Architecture
+
+**Transports**
+- HTTP+JSON (TCP) — primary coordination API
+- Unix domain socket — mode 0600, owner-only
+- WebSocket — `src/http/ws.rs`
+
+**Coordination surface**
+- Agent identity + registry
+- Structured messaging, pub/sub channels
+- Session ledger, handoff protocol, parent/child agent tracking
+- Event payloads carry verifiable `magellan_trace` proof
+
+**Persistence**
+- [atheneum](https://github.com/oldnordic/atheneum) knowledge graph (sessions, discoveries, tasks)
+- sqlitegraph pub/sub foundation
+
+**Companion binary** — `envoy-hook` for session + tool-call logging
+
+**Keyword index:** multi-agent coordination · HTTP · Unix domain socket · pub/sub · session ledger · handoff protocol · agent registry · WebSocket · SQLiteGraph · Atheneum · Rust
+
 ## Install
 
 ```bash
