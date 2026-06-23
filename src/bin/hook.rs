@@ -609,6 +609,86 @@ fn patch_auth(url: &str, agent: &str, body: Value) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+#[derive(Debug)]
+struct SessionData {
+    last_tool_call: Option<String>,
+    last_summary: Option<String>,
+}
+
+/// GET helper for authenticated requests to envoy
+fn get_auth(url: &str, agent: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let response = ureq::get(url).set("X-Agent-Id", agent).call()?;
+
+    let body = response.into_string()?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// Query session data from envoy for auto-discovery
+fn get_session_data(
+    session_id: &str,
+    agent: &str,
+) -> Result<SessionData, Box<dyn std::error::Error>> {
+    let url = &format!("{}/atheneum/sessions/{}", envoy_url(), session_id);
+    let response = get_auth(url, agent)?;
+
+    // Extract last tool call and summary from session events
+    let session = response.get("session").and_then(|s| s.as_object());
+    let events = session
+        .and_then(|s| s.get("events"))
+        .and_then(|e| e.as_array());
+
+    let (last_tool, last_summary) = if let Some(evs) = events {
+        // Find last tool_call event
+        evs.iter()
+            .filter(|e| e.get("event_type").and_then(|t| t.as_str()) == Some("tool_call"))
+            .last()
+            .map_or((None, None), |event| {
+                let payload = event.get("payload").and_then(|p| p.as_object());
+                let tool = payload
+                    .and_then(|p| p.get("tool_name"))
+                    .and_then(|t| t.as_str())
+                    .map(String::from);
+                let summary = payload
+                    .and_then(|p| p.get("output_summary"))
+                    .and_then(|s| s.as_str())
+                    .map(String::from);
+                (tool, summary)
+            })
+    } else {
+        (None, None)
+    };
+
+    Ok(SessionData {
+        last_tool_call: last_tool,
+        last_summary: last_summary,
+    })
+}
+
+/// Check if discovery already exists for session+target (dedup)
+fn discovery_exists_for_session(
+    session_id: &str,
+    target: &str,
+    agent: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let url = &format!(
+        "{}/atheneum/discoveries/recent?session_id={}&limit=50",
+        envoy_url(),
+        session_id
+    );
+    let response = get_auth(url, agent)?;
+
+    if let Some(discoveries) = response.get("discoveries").and_then(|d| d.as_array()) {
+        Ok(discoveries.iter().any(|d| {
+            d.get("target")
+                .and_then(|t| t.as_str())
+                .map(|t| t == target)
+                .unwrap_or(false)
+        }))
+    } else {
+        Ok(false)
+    }
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
@@ -941,6 +1021,43 @@ fn cmd_subagent_end() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )
     .ok();
+
+    // === Auto-store discovery for subagent results ===
+    // Query subagent session for last tool call + summary
+    if let Ok(session_data) = get_session_data(&sid, &aid) {
+        if let (Some(tool), Some(tool_summary)) =
+            (session_data.last_tool_call, session_data.last_summary)
+        {
+            // Create discovery target from tool name
+            let target = format!("subagent_{}", tool.to_lowercase().replace(' ', "-"));
+
+            // Check duplicate (avoid re-storing on retry)
+            let discovery_exists =
+                discovery_exists_for_session(&sid, &target, &aid).unwrap_or(false);
+
+            if !discovery_exists {
+                let project = project_name(&dir);
+                let discovery_payload = json!({
+                    "agent": "claude-subagent",
+                    "discovery_type": "Location",
+                    "target": target,
+                    "session_id": sid,
+                    "auto_stored": true,
+                    "tool_used": tool,
+                    "summary": tool_summary,
+                    "project": project
+                });
+
+                post_auth(
+                    &format!("{}/atheneum/discoveries", envoy_url()),
+                    &aid,
+                    discovery_payload,
+                )
+                .ok();
+            }
+        }
+    }
+    // === END auto-discovery ===
 
     // Emit file-write events for each changed file.
     let numstat = git_diff_numstat(&dir);
