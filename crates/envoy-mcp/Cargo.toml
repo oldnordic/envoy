@@ -1,0 +1,35 @@
+[package]
+name = "envoy-mcp"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+authors = ["oldnordic"]
+description = "MCP server for Envoy — multi-agent coordination via the daemon HTTP API"
+readme = "README.md"
+keywords = ["mcp", "envoy", "agent", "coordination", "tools"]
+categories = ["command-line-utilities", "network-programming"]
+rust-version = "1.87"
+
+[lib]
+name = "envoy_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "envoy-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { version = "1.7", features = ["server", "transport-io"] }
+tokio = { version = "1.44", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+shellexpand = "3.1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tokio-test = "0.4"

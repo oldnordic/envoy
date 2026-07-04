@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### envoy-mcp — orchestration composite tools
+
+- **delegate_task** (`envoy-mcp/backend.rs`, `envoy-mcp/tools.rs`): creates a
+  persistent handoff with goal + context and returns immediately. The
+  receiving agent picks it up when ready. Survives agent restarts. One MCP
+  call replaces store_handoff with a structured manifest.
+- **declare_workflow** (`envoy-mcp/backend.rs`, `envoy-mcp/tools.rs`): declares
+  a multi-agent dependency graph in one call. Each edge says blocker must
+  finish before dependent starts. Envoy enforces ordering across restarts.
+- **status_snapshot** (`envoy-mcp/backend.rs`, `envoy-mcp/tools.rs`): dashboard
+  view — daemon health + all agents + pending handoffs for the caller. One
+  MCP call replaces three round trips.
+- envoy-mcp tool count: 15 → 18.
+
 ## [0.3.1] - 2026-06-22
 
 ### Added
@@ -204,3 +220,23 @@ The `envoy-hook` binary now emits first-class Atheneum evidence instead of just 
 - HTTP server with axum: agents CRUD, messages send/poll/get, health, stats
 - Handoff workflow with end-to-end test
 - 19 total tests passing
+
+### fix(envoy-mcp): ack_message 415 + 422 errors
+
+Two bugs in envoy_ack_message:
+
+1. **415 Unsupported Media Type**: post_empty sent POST with no body and no
+   Content-Type. Daemon's axum handler expects application/json. Fixed:
+   post_empty now sends `Content-Type: application/json` with empty `{}` body.
+
+2. **422 missing agent_id**: daemon's AckRequest struct requires
+   `{"agent_id": "..."}`. The MCP was sending `{}`. Fixed: ack_message now
+   reads the backend's self.agent_id and sends it in the JSON body.
+
+### fix(envoy-mcp): pending_handoff race (documented, not a code bug)
+
+pending_handoff returns null when store_handoff and pending_handoff are
+pipelined together (rmcp dispatches concurrently, pending can run before
+store completes). With sequential timing (real MCP client behavior), the
+handoff is found correctly. Not a code bug — same rmcp concurrency
+artifact documented in the atheneum-mcp memory tests.

@@ -34,12 +34,14 @@ fn envoy_url() -> String {
 fn session_id() -> Option<String> {
     std::env::var("CLAUDE_CODE_SESSION_ID")
         .ok()
+        .or_else(|| std::env::var("SESSION_ID").ok())
         .filter(|s| !s.is_empty())
 }
 
 fn project_dir() -> String {
     std::env::var("CLAUDE_PROJECT_DIR")
         .ok()
+        .or_else(|| std::env::var("PROJECT_DIR").ok())
         .filter(|s| !s.is_empty())
         .or_else(|| {
             std::env::current_dir()
@@ -708,7 +710,15 @@ fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
     };
     let parent_sid = std::env::var("CLAUDE_PARENT_SESSION_ID")
         .ok()
-        .filter(|s| !s.is_empty());
+        .or_else(|| std::env::var("PARENT_SESSION_ID").ok())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            stdin
+                .get("parent_session_id")
+                .or(stdin.get("parent_session"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
     let is_subagent = parent_sid.is_some();
 
     // Register (or reuse) per-session agent; writes GROUNDED_AGENT_ID to CLAUDE_ENV_FILE
@@ -751,7 +761,75 @@ fn cmd_session_start() -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_tool_call() -> Result<(), Box<dyn std::error::Error>> {
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw).ok();
-    let payload: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let mut payload: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+
+    // Normalize Antigravity format to Claude Code format if toolCall is present
+    if let Some(tool_call) = payload.get("toolCall") {
+        let mut tool_name_str = tool_call
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        if tool_name_str == "run_command" {
+            tool_name_str = "Bash".to_string();
+        } else if tool_name_str == "write_to_file" {
+            tool_name_str = "Write".to_string();
+        } else if tool_name_str == "replace_file_content"
+            || tool_name_str == "multi_replace_file_content"
+        {
+            tool_name_str = "Edit".to_string();
+        } else if tool_name_str == "view_file" {
+            tool_name_str = "Read".to_string();
+        } else if tool_name_str == "invoke_subagent" {
+            tool_name_str = "Agent".to_string();
+        }
+
+        let tool_name = Value::String(tool_name_str);
+
+        let mut tool_input = tool_call.get("args").cloned().unwrap_or(Value::Null);
+        // Normalize Antigravity arguments to Claude Code argument names
+        if let Value::Object(ref mut args_map) = tool_input {
+            if let Some(target_file) = args_map.get("TargetFile").cloned() {
+                args_map.insert("file_path".to_string(), target_file);
+            } else if let Some(abs_path) = args_map.get("AbsolutePath").cloned() {
+                args_map.insert("file_path".to_string(), abs_path);
+            }
+            if let Some(cmd_line) = args_map.get("CommandLine").cloned() {
+                args_map.insert("command".to_string(), cmd_line);
+            }
+        }
+
+        // Extract result/response from toolCall or root payload
+        let tool_response = tool_call
+            .get("response")
+            .or(tool_call.get("output"))
+            .or(tool_call.get("result"))
+            .or(payload.get("tool_result"))
+            .or(payload.get("tool_response"))
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        let duration_ms = tool_call
+            .get("duration_ms")
+            .or(payload.get("duration_ms"))
+            .cloned()
+            .unwrap_or(Value::from(0));
+
+        let mut map = serde_json::Map::new();
+        if let Some(sid) = payload.get("session_id") {
+            map.insert("session_id".to_string(), sid.clone());
+        }
+        if let Some(cwd) = payload.get("cwd") {
+            map.insert("cwd".to_string(), cwd.clone());
+        }
+        map.insert("tool_name".to_string(), tool_name);
+        map.insert("tool_input".to_string(), tool_input);
+        map.insert("tool_result".to_string(), tool_response);
+        map.insert("duration_ms".to_string(), duration_ms);
+
+        payload = Value::Object(map);
+    }
 
     // session_id: prefer stdin JSON (always present in PostToolUse), fallback to env
     let sid = payload
