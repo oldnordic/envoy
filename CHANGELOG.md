@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-31
+
+### Added
+
+- **Central knowledge store in cross-project search** (`src/atheneum_bridge/cross.rs`):
+  `GET /atheneum/cross/search` and `GET /atheneum/cross/navigate` now chain
+  `with_central_knowledge_db` onto the `CrossRouter`, so results include the
+  central atheneum store (surfaced as the synthetic `__atheneum_central__`
+  project) alongside per-project code indexes.
+- **envoy-mcp retired-agent filter** (`envoy-mcp/backend.rs`): `list_agents`
+  filters `lifecycle == "retired"` agents by default and reports
+  `total` / `total_unfiltered` / `retired_filtered` counts, keeping operator
+  views readable as the daemon accumulates registrations. Agents without a
+  lifecycle field are preserved. Salvaged from an uncommitted contributor
+  worktree; includes unit tests.
+
 ### envoy-mcp — orchestration composite tools
 
 - **delegate_task** (`envoy-mcp/backend.rs`, `envoy-mcp/tools.rs`): creates a
@@ -20,6 +36,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   view — daemon health + all agents + pending handoffs for the caller. One
   MCP call replaces three round trips.
 - envoy-mcp tool count: 15 → 18.
+
+### Changed
+
+- **`atheneum` dependency 0.8 → 0.12.2 from crates.io** (`Cargo.toml`): the
+  path dependency on a local checkout is gone; envoy now tracks the published
+  crate. Pulls in the CrossRouter central-store fix and the unified tool API
+  groundwork. This also let CI drop its "comment out the private dependency"
+  sed workaround — the atheneum feature is now compiled and tested on CI.
+- **crossbeam-epoch 0.9.18 → 0.9.20** (`Cargo.lock`): fixes
+  RUSTSEC-2026-0204 (invalid pointer dereference in `fmt::Pointer`), pulled
+  in transitively via rayon/sqlitegraph.
+
+### Fixed
+
+- **Test suite**: `setup_test_state_without_atheneum` dropped its `TempDir`
+  on return, deleting the database directory under the open engine; SQLite
+  WAL creation then failed with "disk I/O error". The helper now returns the
+  `TempDir` alongside the state.
+- **Clippy** (`src/bin/hook.rs`): redundant field name in struct init and
+  `filter(..).last()` on a double-ended iterator (now `rfind`), surfaced by
+  the `-D warnings` gate once the atheneum feature compiled on CI.
+
+### Security
+
+- **cargo-audit**: `RUSTSEC-2020-0021` (rio, unmaintained, UAF on leaked
+  future) accepted with justification in `.cargo/audit.toml` — rio reaches
+  envoy only through sqlitegraph's experimental io_uring coordinator; an
+  atheneum task tracks removing it upstream.
 
 ## [0.3.1] - 2026-06-22
 

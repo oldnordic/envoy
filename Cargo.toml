@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "agent-envoy"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "Message/coordination server for AI coding agents using sqlitegraph pub/sub"
 license = "GPL-3.0-only"
