@@ -36,7 +36,7 @@ parking_lot = "0.12"
 hyper = { version = "1.0", features = ["full"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
-atheneum = { path = "../atheneum/crates/atheneum", version = "0.10", optional = true }
+atheneum = { version = "0.12.2", optional = true }
 ureq = { version = "2", default-features = false, features = ["json"] }
 
 [dev-dependencies]

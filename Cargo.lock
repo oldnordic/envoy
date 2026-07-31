@@ -102,7 +102,9 @@ dependencies = [
 
 [[package]]
 name = "atheneum"
-version = "0.10.0"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7beb38035c2ea82cd29cb9821a3ab495252618f4cf6a5dae4f02b6e117a58547"
 dependencies = [
  "anyhow",
  "chrono",
@@ -117,6 +119,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+ "ureq",
  "uuid",
 ]
 
@@ -848,8 +851,6 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -859,6 +860,8 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -1283,11 +1286,11 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.12.5"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -1897,6 +1900,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rio"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e98c25665909853c07874301124482754434520ab572ac6a22e90366de6685b"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rmcp"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1965,7 +1977,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -2280,15 +2294,17 @@ dependencies = [
 
 [[package]]
 name = "sqlitegraph"
-version = "3.3.1"
+version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51c5154959dedd0045c7d942286a5d759e454e1ffe511e864d9b70e7db9447b5"
+checksum = "2e7bac776a030dc13bfd5d1b7a7605daed41b025b33b2d873cc8783cda3c140e"
 dependencies = [
  "ahash",
  "arc-swap",
  "bincode",
  "binrw",
  "bytemuck",
+ "chrono",
+ "futures",
  "log",
  "lru",
  "memmap2",
@@ -2299,12 +2315,14 @@ dependencies = [
  "rand 0.8.6",
  "rayon",
  "regex",
+ "rio",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "sysinfo",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -2806,9 +2824,12 @@ dependencies = [
  "base64",
  "log",
  "once_cell",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -2996,6 +3017,24 @@ checksum = "4b572dff8bcf38bad0fa19729c89bb5748b2b9b1d8be70cf90df697e3a8f32aa"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
