@@ -223,7 +223,8 @@ impl Backend for HttpBackend {
     }
 
     async fn list_agents(&self) -> Result<Value> {
-        self.get_json("/agents").await
+        let raw: Value = self.get_json("/agents").await?;
+        Ok(filter_retired_agents_view(raw))
     }
 
     async fn send_message(
@@ -399,6 +400,36 @@ impl Backend for HttpBackend {
 // Helper: minimal percent-encoding for query/path segments.
 // -----------------------------------------------------------------------
 
+fn filter_retired_agents_view(mut raw: Value) -> Value {
+    // Filter retired agents by default. The daemon accumulates every agent
+    // ever registered, which makes operator views unreadable. Keep the
+    // response shape stable while surfacing how much noise was filtered.
+    if let Some(obj) = raw.as_object_mut() {
+        if let Some(agents) = obj.get_mut("agents").and_then(|a| a.as_array_mut()) {
+            let total_unfiltered = agents.len();
+            agents.retain(|a| {
+                a.get("lifecycle")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s != "retired")
+                    .unwrap_or(true)
+            });
+            let active_count = agents.len();
+            let retired_filtered = total_unfiltered.saturating_sub(active_count);
+            obj.insert("total".to_string(), Value::from(active_count));
+            obj.insert(
+                "total_unfiltered".to_string(),
+                Value::from(total_unfiltered),
+            );
+            obj.insert(
+                "retired_filtered".to_string(),
+                Value::from(retired_filtered),
+            );
+            obj.insert("filter".to_string(), Value::from("active_only"));
+        }
+    }
+    raw
+}
+
 fn encode(s: &str) -> String {
     let needs_encoding = s
         .bytes()
@@ -434,5 +465,44 @@ mod tests {
     fn base_url_trailing_slash_is_trimmed() {
         let b = HttpBackend::new("http://localhost:9876/");
         assert_eq!(b.base_url, "http://localhost:9876");
+    }
+
+    #[test]
+    fn filter_retired_agents_keeps_active_and_reports_counts() {
+        let raw = serde_json::json!({
+            "agents": [
+                { "agent_id": "id1", "lifecycle": "active", "name": "alpha" },
+                { "agent_id": "id2", "lifecycle": "retired", "name": "beta" },
+                { "agent_id": "id3", "lifecycle": "active", "name": "gamma" }
+            ],
+            "total": 3
+        });
+
+        let filtered = filter_retired_agents_view(raw);
+        let agents = filtered["agents"].as_array().unwrap();
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(filtered["total"], 2);
+        assert_eq!(filtered["total_unfiltered"], 3);
+        assert_eq!(filtered["retired_filtered"], 1);
+        assert_eq!(filtered["filter"], "active_only");
+        assert!(agents.iter().all(|a| a["lifecycle"] != "retired"));
+    }
+
+    #[test]
+    fn filter_retired_agents_preserves_agents_without_lifecycle() {
+        let raw = serde_json::json!({
+            "agents": [
+                { "agent_id": "id1", "name": "legacy" },
+                { "agent_id": "id2", "lifecycle": "retired", "name": "beta" }
+            ]
+        });
+
+        let filtered = filter_retired_agents_view(raw);
+        let agents = filtered["agents"].as_array().unwrap();
+
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["name"], "legacy");
+        assert_eq!(filtered["retired_filtered"], 1);
     }
 }
