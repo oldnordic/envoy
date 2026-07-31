@@ -34,14 +34,18 @@ fn to_edge_item(edge: &atheneum::CrossEdge) -> CrossEdgeItem {
 
 /// GET /atheneum/cross/search?q=...&language=...&k=N
 pub async fn get_cross_search(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<CrossSearchQuery>,
 ) -> Result<Json<CrossSearchResponse>> {
     let q = query.q.clone();
     let k = query.k.max(1);
     let language = query.language.clone();
+    let central_path = state.atheneum_path.clone();
     let hits = tokio::task::spawn_blocking(move || {
         let mut router = atheneum::CrossRouter::open()?;
+        if let Some(p) = central_path {
+            router = router.with_central_knowledge_db(std::path::PathBuf::from(p));
+        }
         router
             .cross_search(&q, language.as_deref(), k)
             .map_err(crate::error::EnvoyError::from)
@@ -59,15 +63,19 @@ pub async fn get_cross_search(
 
 /// GET /atheneum/cross/navigate?q=...&language=...&k=N&depth=D
 pub async fn get_cross_navigate(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<CrossNavigateQuery>,
 ) -> Result<Json<CrossNavigateResponse>> {
     let q = query.q.clone();
     let k = query.k.max(1);
     let depth = query.depth.max(1);
     let language = query.language.clone();
+    let central_path = state.atheneum_path.clone();
     let views = tokio::task::spawn_blocking(move || {
         let mut router = atheneum::CrossRouter::open()?;
+        if let Some(p) = central_path {
+            router = router.with_central_knowledge_db(std::path::PathBuf::from(p));
+        }
         router
             .cross_navigate(&q, language.as_deref(), k, depth)
             .map_err(crate::error::EnvoyError::from)
