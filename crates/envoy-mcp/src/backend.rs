@@ -249,11 +249,7 @@ impl Backend for HttpBackend {
 
     async fn ack_message(&self, id: &str) -> Result<Value> {
         let path = format!("/messages/{}/ack", encode(id));
-        let agent_id = self
-            .agent_id
-            .lock()
-            .clone()
-            .unwrap_or_default();
+        let agent_id = self.agent_id.lock().clone().unwrap_or_default();
         self.post_json(&path, &serde_json::json!({"agent_id": agent_id}))
             .await
     }

@@ -43,16 +43,20 @@ fn setup_test_state_with_atheneum() -> (Arc<AppState>, tempfile::TempDir, String
 }
 
 /// Helper to create test AppState WITHOUT atheneum
-fn setup_test_state_without_atheneum() -> Arc<AppState> {
+/// Returns the TempDir alongside the state: dropping it would delete the
+/// database directory out from under the open engine (SQLite WAL journal
+/// creation then fails with "disk I/O error").
+fn setup_test_state_without_atheneum() -> (Arc<AppState>, tempfile::TempDir) {
     let db_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let db_path = db_dir.path().join("test.db");
 
     let engine =
         Engine::open(db_path.to_str().expect("Invalid path")).expect("Failed to open engine");
 
-    Arc::new(
+    let state = Arc::new(
         AppState::new(engine).expect("Failed to create AppState"), // with_atheneum(None) or just omit the call - defaults to None
-    )
+    );
+    (state, db_dir)
 }
 
 /// Helper to register two test agents
@@ -260,7 +264,7 @@ async fn test_non_handoff_message_not_stored_to_atheneum() {
 
 #[tokio::test]
 async fn test_message_delivery_succeeds_when_atheneum_not_configured() {
-    let state = setup_test_state_without_atheneum();
+    let (state, _db_dir) = setup_test_state_without_atheneum();
 
     let (agent1_id, agent2_id) = register_test_agents(state.clone()).await;
 
