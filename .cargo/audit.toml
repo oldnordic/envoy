@@ -1,0 +1,9 @@
+[advisories]
+# RUSTSEC-2020-0021 (rio 0.9.4, use-after-free when a rio Future is leaked):
+# transitive via sqlitegraph 3.9.0 (envoy's graph engine). rio is used in a
+# single experimental io_uring coordinator inside sqlitegraph-core
+# (backend/native/v3/async_io/coordinator.rs); envoy never touches rio
+# directly. No patched rio release exists (crate unmaintained since 2020).
+# Accepted risk pending removal of the rio dependency from sqlitegraph —
+# tracked as an atheneum task in project sqlitegraph.
+ignore = ["RUSTSEC-2020-0021"]
