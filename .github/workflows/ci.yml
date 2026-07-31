@@ -28,12 +28,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Comment out private atheneum dependency for CI
-        run: |
-          sed -i 's/^default = \["atheneum"\]/default = []/' Cargo.toml
-          sed -i 's/atheneum = \["dep:atheneum"\]/atheneum = []/' Cargo.toml
-          sed -i '/^atheneum = { path = "\.\.\//s/^/# /' Cargo.toml
-
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
@@ -63,12 +57,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Comment out private atheneum dependency for CI
-        run: |
-          sed -i 's/^default = \["atheneum"\]/default = []/' Cargo.toml
-          sed -i 's/atheneum = \["dep:atheneum"\]/atheneum = []/' Cargo.toml
-          sed -i '/^atheneum = { path = "\.\.\//s/^/# /' Cargo.toml
-
       - name: cargo test
         run: cargo test --all
 
@@ -85,12 +73,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-
-      - name: Comment out private atheneum dependency for CI
-        run: |
-          sed -i 's/^default = \["atheneum"\]/default = []/' Cargo.toml
-          sed -i 's/atheneum = \["dep:atheneum"\]/atheneum = []/' Cargo.toml
-          sed -i '/^atheneum = { path = "\.\.\//s/^/# /' Cargo.toml
 
       - name: Build release binary
         run: cargo build --release
