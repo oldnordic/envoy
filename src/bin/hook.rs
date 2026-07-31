@@ -642,8 +642,7 @@ fn get_session_data(
     let (last_tool, last_summary) = if let Some(evs) = events {
         // Find last tool_call event
         evs.iter()
-            .filter(|e| e.get("event_type").and_then(|t| t.as_str()) == Some("tool_call"))
-            .last()
+            .rfind(|e| e.get("event_type").and_then(|t| t.as_str()) == Some("tool_call"))
             .map_or((None, None), |event| {
                 let payload = event.get("payload").and_then(|p| p.as_object());
                 let tool = payload
@@ -662,7 +661,7 @@ fn get_session_data(
 
     Ok(SessionData {
         last_tool_call: last_tool,
-        last_summary: last_summary,
+        last_summary,
     })
 }
 
